@@ -57,6 +57,10 @@
       {
         "command": "autocontinue.openOutputLog",
         "title": "AutoContinue: Open Output Log"
+      },
+      {
+        "command": "autocontinue.toggleBackground",
+        "title": "AutoContinue: Toggle Background Mode"
       }
     ],
     "configuration": {
@@ -97,6 +101,11 @@
         "command": "autocontinue.toggle",
         "key": "ctrl+shift+k",
         "mac": "cmd+shift+k"
+      },
+      {
+        "command": "autocontinue.toggleBackground",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b"
       }
     ]
   },

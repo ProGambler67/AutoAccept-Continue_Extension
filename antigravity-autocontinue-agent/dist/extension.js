@@ -3994,7 +3994,8 @@ var require_cdp_handler = __commonJS({
             const configJson = JSON.stringify({
               maxRetries: config.maxRetries || 50,
               retryCooldownMs: config.retryCooldownMs || 3e3,
-              pollInterval: config.pollInterval || 500
+              pollInterval: config.pollInterval || 500,
+              isBackgroundMode: !!config.isBackgroundMode
             });
             if (!quiet) {
               this.log(`Calling __autoContinueStart in ${id}`);
@@ -4088,6 +4089,7 @@ var vscode = require("vscode");
 var http = require("http");
 var os = require("os");
 var isEnabled = false;
+var backgroundModeEnabled = false;
 var pollTimer;
 var statusBarItem;
 var statusControlPanelItem;
@@ -4103,6 +4105,7 @@ var retryCooldownMs = 3e3;
 var lastControlPanelStatePushTs = 0;
 var cdpRefreshTimer;
 var ENABLED_STATE_KEY = "autocontinue-enabled";
+var BACKGROUND_STATE_KEY = "autocontinue-background";
 var DEFAULT_CDP_PORT = 9e3;
 function log(message) {
   try {
@@ -4172,6 +4175,7 @@ async function activate(context) {
   }
   try {
     isEnabled = context.globalState.get(ENABLED_STATE_KEY, false);
+    backgroundModeEnabled = context.globalState.get(BACKGROUND_STATE_KEY, false);
     currentIDE = detectIDE();
     loadConfiguration();
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -4193,6 +4197,7 @@ async function activate(context) {
     updateStatusBar();
     context.subscriptions.push(
       vscode.commands.registerCommand("autocontinue.toggle", () => handleToggle(context)),
+      vscode.commands.registerCommand("autocontinue.toggleBackground", () => handleToggleBackground(context)),
       vscode.commands.registerCommand("autocontinue.openControlPanel", () => openControlPanel(context)),
       vscode.commands.registerCommand("autocontinue.copyDiagnostics", () => handleCopyDiagnostics()),
       vscode.commands.registerCommand("autocontinue.openOutputLog", () => {
@@ -4220,7 +4225,11 @@ function loadConfiguration() {
 function updateStatusBar() {
   if (!statusBarItem)
     return;
-  if (isEnabled) {
+  if (isEnabled && backgroundModeEnabled) {
+    statusBarItem.text = "$(sync~spin) AutoContinue: BG";
+    statusBarItem.tooltip = "AutoContinue (Background Mode) \u2014 click to disable";
+    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+  } else if (isEnabled) {
     statusBarItem.text = "$(sync~spin) AutoContinue: ON";
     statusBarItem.tooltip = "AutoContinue is active \u2014 click to disable";
     statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
@@ -4242,6 +4251,25 @@ async function handleToggle(context) {
     log("AutoContinue: DISABLED");
     await stopMonitoring();
     vscode.window.showInformationMessage("AutoContinue: Disabled");
+  }
+  pushControlPanelState();
+}
+async function handleToggleBackground(context) {
+  backgroundModeEnabled = !backgroundModeEnabled;
+  await context.globalState.update(BACKGROUND_STATE_KEY, backgroundModeEnabled);
+  updateStatusBar();
+  if (backgroundModeEnabled) {
+    log("Background mode: ENABLED");
+    vscode.window.showInformationMessage("AutoContinue: Background mode enabled \u2014 overlay will cover the IDE panel");
+    if (isEnabled) {
+      await syncCDP();
+    }
+  } else {
+    log("Background mode: DISABLED");
+    vscode.window.showInformationMessage("AutoContinue: Background mode disabled");
+    if (isEnabled) {
+      await syncCDP();
+    }
   }
   pushControlPanelState();
 }
@@ -4274,6 +4302,7 @@ async function syncCDP() {
       maxRetries,
       retryCooldownMs,
       pollInterval,
+      isBackgroundMode: backgroundModeEnabled,
       quiet: true
     });
   } catch (err) {
@@ -4310,6 +4339,9 @@ function openControlPanel(context) {
         break;
       case "toggleAuto":
         await handleToggle(context);
+        break;
+      case "toggleBackground":
+        await handleToggleBackground(context);
         break;
       case "savePort": {
         const port = normalizeCdpPort(msg.port, cdpPort);
@@ -4364,6 +4396,7 @@ async function pushControlPanelState() {
       type: "state",
       state: {
         isEnabled,
+        backgroundModeEnabled,
         ide: currentIDE,
         platform: process.platform,
         cdpPort,
@@ -4522,7 +4555,10 @@ function getControlPanelHtml() {
 
     <div class="card">
       <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
-        <button class="primary" id="toggleBtn">Enable AutoContinue</button>
+        <div class="row">
+          <button class="primary" id="toggleBtn">Enable AutoContinue</button>
+          <button class="secondary" id="toggleBgBtn">Background: OFF</button>
+        </div>
         <button class="secondary" id="refreshBtn">Refresh</button>
       </div>
       <div id="cdpStatus" class="cdp-status">Checking CDP...</div>
@@ -4608,7 +4644,17 @@ function getControlPanelHtml() {
       const mainCard = byId('mainCard');
       const toggleBtn = byId('toggleBtn');
 
-      if (s.isEnabled) {
+      const bgBtn = byId('toggleBgBtn');
+
+      if (s.isEnabled && s.backgroundModeEnabled) {
+        badge.className = 'status-badge on';
+        dot.className = 'dot on';
+        label.textContent = 'BG MODE';
+        mainCard.classList.add('glow');
+        toggleBtn.textContent = 'Disable AutoContinue';
+        toggleBtn.className = 'button warn';
+        toggleBtn.style.background = '#8a6517';
+      } else if (s.isEnabled) {
         badge.className = 'status-badge on';
         dot.className = 'dot on';
         label.textContent = 'ACTIVE';
@@ -4624,6 +4670,14 @@ function getControlPanelHtml() {
         toggleBtn.textContent = 'Enable AutoContinue';
         toggleBtn.className = 'button primary';
         toggleBtn.style.background = '';
+      }
+
+      if (s.backgroundModeEnabled) {
+        bgBtn.textContent = 'Background: ON';
+        bgBtn.style.background = '#1f6b37';
+      } else {
+        bgBtn.textContent = 'Background: OFF';
+        bgBtn.style.background = '';
       }
 
       // CDP status
@@ -4689,6 +4743,7 @@ function getControlPanelHtml() {
     });
 
     byId('toggleBtn').addEventListener('click', () => post('toggleAuto'));
+    byId('toggleBgBtn').addEventListener('click', () => post('toggleBackground'));
     byId('refreshBtn').addEventListener('click', () => post('refresh'));
     byId('savePort').addEventListener('click', () => post('savePort', { port: Number(byId('portInput').value) }));
     byId('saveMaxRetries').addEventListener('click', () => post('saveMaxRetries', { value: Number(byId('maxRetriesInput').value) }));
@@ -4712,6 +4767,7 @@ async function handleCopyDiagnostics() {
       `ide=${currentIDE}`,
       `platform=${process.platform}`,
       `enabled=${isEnabled}`,
+      `backgroundMode=${backgroundModeEnabled}`,
       `cdpPort=${cdpPort}`,
       `cdpReady=${cdpReady}`,
       `connectionCount=${cdpHandler ? cdpHandler.getConnectionCount() : 0}`,

@@ -268,7 +268,8 @@ class CDPHandler {
                 const configJson = JSON.stringify({
                     maxRetries: config.maxRetries || 50,
                     retryCooldownMs: config.retryCooldownMs || 3000,
-                    pollInterval: config.pollInterval || 500
+                    pollInterval: config.pollInterval || 500,
+                    isBackgroundMode: !!config.isBackgroundMode
                 });
                 if (!quiet) {
                     this.log(`Calling __autoContinueStart in ${id}`);

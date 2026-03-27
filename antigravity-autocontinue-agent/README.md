@@ -8,10 +8,11 @@ When Antigravity encounters "server traffic too high", rate limits, network erro
 
 - 🔄 **Automatic Error Detection** — monitors 120+ error patterns (rate limits, server errors, connection failures, agent execution errors)
 - ⚡ **Instant Retry** — clicks Continue/Retry buttons automatically or sends "continue" via chat input as fallback
+- 🌑 **Background Mode** — dark overlay covers the IDE while the agent works silently, with live retry/error stats
 - 🎛️ **Simple Control Panel** — toggle ON/OFF, view retry stats, configure settings
 - 🔒 **Safety Guards** — cooldowns, max retry limits, user-typing detection, deduplication
 - 🖥️ **Cross-Platform** — works on Windows 10, macOS, and Linux
-- ⌨️ **Keyboard Shortcut** — `Ctrl+Shift+K` (macOS: `Cmd+Shift+K`) to toggle
+- ⌨️ **Keyboard Shortcuts** — `Ctrl+Shift+K` to toggle, `Ctrl+Shift+B` for background mode
 
 ## Installation
 
@@ -37,7 +38,8 @@ npm run compile
 
 1. **Enable CDP** — Launch Antigravity with `--remote-debugging-port=9000`
 2. **Toggle ON** — Click the status bar item or press `Ctrl+Shift+K`
-3. **Done** — The extension automatically detects and recovers from errors
+3. **Background Mode (optional)** — Press `Ctrl+Shift+B` to enable the dark overlay while the agent works
+4. **Done** — The extension automatically detects and recovers from errors
 
 ## Configuration
 
@@ -50,12 +52,13 @@ npm run compile
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `AutoContinue: Toggle ON/OFF` | Enable/disable auto-retry |
-| `AutoContinue: Open Control Panel` | Open the settings and stats panel |
-| `AutoContinue: Copy Diagnostics` | Copy diagnostic info to clipboard |
-| `AutoContinue: Open Output Log` | Show the extension output log |
+| Command | Shortcut | Description |
+|---------|----------|-------------|
+| `AutoContinue: Toggle ON/OFF` | `Ctrl+Shift+K` | Enable/disable auto-retry |
+| `AutoContinue: Toggle Background Mode` | `Ctrl+Shift+B` | Toggle dark overlay background mode |
+| `AutoContinue: Open Control Panel` | — | Open the settings and stats panel |
+| `AutoContinue: Copy Diagnostics` | — | Copy diagnostic info to clipboard |
+| `AutoContinue: Open Output Log` | — | Show the extension output log |
 
 ## Error Patterns Detected
 

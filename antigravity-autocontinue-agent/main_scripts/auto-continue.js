@@ -563,6 +563,86 @@
     }
 
     // =================================================================
+    // BACKGROUND MODE OVERLAY
+    // =================================================================
+
+    const OVERLAY_ID = '__autocontinue-bg-overlay';
+
+    function mountOverlay(state) {
+        if (document.getElementById(OVERLAY_ID)) return; // Already mounted
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.cssText = [
+            'position: fixed',
+            'top: 0',
+            'left: 0',
+            'width: 100vw',
+            'height: 100vh',
+            'background: rgba(0, 0, 0, 0.82)',
+            'z-index: 999999',
+            'display: flex',
+            'flex-direction: column',
+            'align-items: center',
+            'justify-content: center',
+            'font-family: "Segoe UI", system-ui, -apple-system, sans-serif',
+            'color: #e6edf3',
+            'pointer-events: none',
+            'user-select: none',
+            'backdrop-filter: blur(2px)'
+        ].join(';');
+
+        overlay.innerHTML = `
+            <div style="text-align:center; max-width:420px; padding:32px;">
+                <div style="font-size:48px; margin-bottom:16px; animation: acSpin 2s linear infinite;">⚡</div>
+                <div style="font-size:22px; font-weight:700; margin-bottom:8px;
+                    background: linear-gradient(135deg, #00d4aa, #00e5bf);
+                    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                    background-clip: text;">AutoContinue — Background Mode</div>
+                <div style="font-size:13px; color: #8b99a8; margin-bottom:24px;">
+                    The agent is working in the background.<br/>
+                    Errors are being detected and retried automatically.
+                </div>
+                <div style="display:flex; gap:20px; justify-content:center;">
+                    <div style="text-align:center;">
+                        <div style="font-size:28px; font-weight:800; color:#00d4aa;" id="__ac-bg-retries">0</div>
+                        <div style="font-size:10px; color:#8b99a8; text-transform:uppercase; letter-spacing:0.8px;">Retries</div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:28px; font-weight:800;" id="__ac-bg-errors">0</div>
+                        <div style="font-size:10px; color:#8b99a8; text-transform:uppercase; letter-spacing:0.8px;">Errors</div>
+                    </div>
+                </div>
+                <div style="margin-top:20px; font-size:11px; color:#555; padding:8px 16px;
+                    border: 1px solid #1e2a3a; border-radius:8px; background: rgba(0,0,0,0.3);">
+                    Press <kbd style="background:#1e2a3a; padding:2px 6px; border-radius:4px; color:#8b99a8;">Ctrl+Shift+B</kbd> to exit background mode
+                </div>
+            </div>
+            <style>
+                @keyframes acSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+            </style>
+        `;
+
+        (document.body || document.documentElement).appendChild(overlay);
+        log('Background mode overlay mounted');
+    }
+
+    function updateOverlayStats(state) {
+        const retriesEl = document.getElementById('__ac-bg-retries');
+        const errorsEl = document.getElementById('__ac-bg-errors');
+        if (retriesEl) retriesEl.textContent = String(state.retries || 0);
+        if (errorsEl) errorsEl.textContent = String(state.errorsDetected || 0);
+    }
+
+    function dismountOverlay() {
+        const overlay = document.getElementById(OVERLAY_ID);
+        if (overlay) {
+            overlay.remove();
+            log('Background mode overlay removed');
+        }
+    }
+
+    // =================================================================
     // MAIN SCAN LOOP
     // =================================================================
 
@@ -662,6 +742,7 @@
     if (!window.__autoContinueState) {
         window.__autoContinueState = {
             isRunning: false,
+            isBackgroundMode: false,
             sessionID: 0,
             retries: 0,
             errorsDetected: 0,
@@ -678,6 +759,7 @@
             pollInterval: 500,
             clickInterval: null,
             domObserver: null,
+            overlayUpdateInterval: null,
             _lastNoActionLogAt: 0
         };
     }
@@ -692,6 +774,7 @@
             lastRetryAction: s.lastRetryAction || '',
             lastRetryAt: s.lastRetryAt ? new Date(s.lastRetryAt).toISOString() : '',
             isRunning: s.isRunning,
+            isBackgroundMode: s.isBackgroundMode || false,
             pausedForMaxRetries: s.pausedForMaxRetries || false
         };
     };
@@ -710,6 +793,7 @@
         state.maxRetries = config.maxRetries || 50;
         state.retryCooldownMs = config.retryCooldownMs || 3000;
         state.pollInterval = config.pollInterval || 500;
+        state.isBackgroundMode = !!config.isBackgroundMode;
         state.consecutiveRetries = 0;
         state.lastRetryAt = 0;
         state.lastRetryAction = '';
@@ -757,7 +841,21 @@
         }, state.pollInterval);
 
         log(`Poll loop started (${state.pollInterval}ms)`);
-        log('AutoContinue is ACTIVE');
+
+        // Background mode overlay
+        if (state.isBackgroundMode) {
+            mountOverlay(state);
+            // Update overlay stats periodically
+            state.overlayUpdateInterval = setInterval(() => {
+                if (state.isRunning && state.isBackgroundMode) {
+                    updateOverlayStats(state);
+                }
+            }, 1000);
+        } else {
+            dismountOverlay();
+        }
+
+        log('AutoContinue is ACTIVE' + (state.isBackgroundMode ? ' [BACKGROUND MODE]' : ''));
     };
 
     window.__autoContinueStop = function() {
@@ -769,10 +867,17 @@
             state.clickInterval = null;
         }
 
+        if (state.overlayUpdateInterval) {
+            clearInterval(state.overlayUpdateInterval);
+            state.overlayUpdateInterval = null;
+        }
+
         if (state.domObserver) {
             try { state.domObserver.disconnect(); } catch (e) { }
             state.domObserver = null;
         }
+
+        dismountOverlay();
 
         log(`Stopped. Total retries: ${state.retries}, errors detected: ${state.errorsDetected}`);
     };
