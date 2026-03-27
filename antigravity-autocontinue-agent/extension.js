@@ -543,13 +543,21 @@ function getControlPanelHtml() {
 
     <div class="card">
       <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
-        <div class="row">
-          <button class="primary" id="toggleBtn">Enable AutoContinue</button>
-          <button class="secondary" id="toggleBgBtn">Background: OFF</button>
-        </div>
+        <button class="primary" id="toggleBtn">Enable AutoContinue</button>
         <button class="secondary" id="refreshBtn">Refresh</button>
       </div>
       <div id="cdpStatus" class="cdp-status">Checking CDP...</div>
+    </div>
+
+    <div class="card" id="bgCard" style="border-color: #1e2a3a;">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <div style="font-size: 14px; font-weight: 700;">🌑 Background Mode</div>
+          <div class="muted" style="margin-top: 4px;">Dark overlay with live stats while the agent works silently</div>
+        </div>
+        <button id="toggleBgBtn" class="secondary" style="min-width: 130px; padding: 10px 20px; font-size: 13px; font-weight: 700;">OFF</button>
+      </div>
+      <div class="muted" style="margin-top: 8px;">Shortcut: <kbd style="background:#1e2a3a; padding:2px 6px; border-radius:4px;">Ctrl+Shift+B</kbd></div>
     </div>
 
     <div class="card">
@@ -632,7 +640,6 @@ function getControlPanelHtml() {
       const mainCard = byId('mainCard');
       const toggleBtn = byId('toggleBtn');
 
-      const bgBtn = byId('toggleBgBtn');
 
       if (s.isEnabled && s.backgroundModeEnabled) {
         badge.className = 'status-badge on';
@@ -660,12 +667,21 @@ function getControlPanelHtml() {
         toggleBtn.style.background = '';
       }
 
+      const bgBtn = byId('toggleBgBtn');
+      const bgCard = byId('bgCard');
+
       if (s.backgroundModeEnabled) {
-        bgBtn.textContent = 'Background: ON';
-        bgBtn.style.background = '#1f6b37';
+        bgBtn.textContent = '✓ ON';
+        bgBtn.style.background = 'linear-gradient(135deg, #1f6b37, #2ea043)';
+        bgBtn.style.color = '#fff';
+        bgCard.style.borderColor = '#2ea043';
+        bgCard.style.boxShadow = '0 0 15px rgba(46, 160, 67, 0.15)';
       } else {
-        bgBtn.textContent = 'Background: OFF';
+        bgBtn.textContent = 'OFF';
         bgBtn.style.background = '';
+        bgBtn.style.color = '';
+        bgCard.style.borderColor = '#1e2a3a';
+        bgCard.style.boxShadow = '';
       }
 
       // CDP status
