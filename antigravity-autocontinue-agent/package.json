@@ -1,0 +1,111 @@
+{
+  "name": "antigravity-autocontinue",
+  "displayName": "Antigravity AutoContinue Agent",
+  "description": "Automatically retries and continues when Antigravity encounters server errors, rate limits, or interrupted agent flows. Bulletproof error detection with one-click toggle.",
+  "version": "1.0.0",
+  "publisher": "pesosz",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pesoszpesosz/antigravity-autocontinue"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "antigravity",
+    "auto-continue",
+    "retry",
+    "rate-limit",
+    "agent",
+    "automation",
+    "cdp",
+    "error-recovery"
+  ],
+  "scripts": {
+    "compile": "esbuild extension.js --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx vsce package",
+    "build:vsix": "npm run compile && npm run package"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "autocontinue.toggle",
+        "title": "AutoContinue: Toggle ON/OFF"
+      },
+      {
+        "command": "autocontinue.openControlPanel",
+        "title": "AutoContinue: Open Control Panel"
+      },
+      {
+        "command": "autocontinue.copyDiagnostics",
+        "title": "AutoContinue: Copy Diagnostics"
+      },
+      {
+        "command": "autocontinue.openOutputLog",
+        "title": "AutoContinue: Open Output Log"
+      }
+    ],
+    "configuration": {
+      "title": "Antigravity AutoContinue Agent",
+      "properties": {
+        "autoContinue.cdpPort": {
+          "type": "number",
+          "default": 9000,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "CDP port used to connect to the IDE for DOM inspection"
+        },
+        "autoContinue.pollInterval": {
+          "type": "number",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 5000,
+          "description": "Polling interval in milliseconds for error detection fallback"
+        },
+        "autoContinue.maxRetries": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum consecutive retries before auto-pausing (resets on success)"
+        },
+        "autoContinue.retryCooldownMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 30000,
+          "description": "Minimum cooldown between retry attempts in milliseconds"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "autocontinue.toggle",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k"
+      }
+    ]
+  },
+  "dependencies": {
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "esbuild": "^0.19.0",
+    "vsce": "^2.15.0"
+  }
+}
