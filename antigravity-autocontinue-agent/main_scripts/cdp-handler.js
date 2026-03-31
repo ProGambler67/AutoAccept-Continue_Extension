@@ -5,6 +5,7 @@ const path = require('path');
 
 const DEFAULT_BASE_PORT = 9000;
 const DEFAULT_PORT_RANGE = 3;
+const RECONNECT_DELAY_MS = 1500;
 
 function normalizePort(value, fallback = DEFAULT_BASE_PORT) {
     const num = Number(value);
@@ -22,11 +23,11 @@ function normalizePortRange(value, fallback = DEFAULT_PORT_RANGE) {
     return range;
 }
 
-// Load auto-continue.js script
+// Load auto-continue.js script (with cache-busting on file change)
 let _autoContinueScript = null;
-function getAutoContinueScript() {
-    if (_autoContinueScript) return _autoContinueScript;
+let _autoContinueScriptMtime = 0;
 
+function getAutoContinueScript() {
     const candidates = [
         path.join(__dirname, 'auto-continue.js'),
         path.join(__dirname, 'main_scripts', 'auto-continue.js'),
@@ -35,8 +36,18 @@ function getAutoContinueScript() {
 
     for (const scriptPath of candidates) {
         if (fs.existsSync(scriptPath)) {
-            _autoContinueScript = fs.readFileSync(scriptPath, 'utf8');
-            return _autoContinueScript;
+            try {
+                const stat = fs.statSync(scriptPath);
+                const mtime = stat.mtimeMs || 0;
+                if (_autoContinueScript && mtime === _autoContinueScriptMtime) {
+                    return _autoContinueScript;
+                }
+                _autoContinueScript = fs.readFileSync(scriptPath, 'utf8');
+                _autoContinueScriptMtime = mtime;
+                return _autoContinueScript;
+            } catch (e) {
+                // Fall through to next candidate
+            }
         }
     }
 
@@ -52,6 +63,8 @@ class CDPHandler {
         this._lastConfigHash = '';
         this.basePort = DEFAULT_BASE_PORT;
         this.portRange = DEFAULT_PORT_RANGE;
+        this._reconnectTimers = new Map();
+        this._targetUrls = new Map(); // id -> webSocketDebuggerUrl for reconnection
     }
 
     log(msg) {
@@ -110,6 +123,7 @@ class CDPHandler {
             if (!candidateSet.has(port)) {
                 try { conn.ws.close(); } catch (e) { }
                 this.connections.delete(id);
+                this._targetUrls.delete(id);
             }
         }
 
@@ -118,7 +132,8 @@ class CDPHandler {
             p: this.basePort,
             r: this.portRange,
             mr: config?.maxRetries || 50,
-            cd: config?.retryCooldownMs || 3000
+            cd: config?.retryCooldownMs || 5000,
+            ds: config?.retryDelaySeconds || 5
         });
 
         if (!quiet || this._lastConfigHash !== configHash) {
@@ -137,6 +152,7 @@ class CDPHandler {
                     for (const page of pages) {
                         const id = `${port}:${page.id}`;
                         if (!this.connections.has(id)) {
+                            this._targetUrls.set(id, page.webSocketDebuggerUrl);
                             await this._connect(id, page.webSocketDebuggerUrl);
                         }
                         await this._inject(id, config);
@@ -150,6 +166,13 @@ class CDPHandler {
 
     async stop() {
         this.isEnabled = false;
+
+        // Clear all reconnect timers
+        for (const [id, timer] of this._reconnectTimers) {
+            clearTimeout(timer);
+        }
+        this._reconnectTimers.clear();
+
         for (const [id, conn] of this.connections) {
             try {
                 await this._evaluate(id, 'if(window.__autoContinueStop) window.__autoContinueStop()');
@@ -157,6 +180,7 @@ class CDPHandler {
             } catch (e) { }
         }
         this.connections.clear();
+        this._targetUrls.clear();
     }
 
     async _getPages(port) {
@@ -165,7 +189,7 @@ class CDPHandler {
                 hostname: '127.0.0.1',
                 port,
                 path: '/json/list',
-                timeout: 500
+                timeout: 800
             }, (res) => {
                 let body = '';
                 res.on('data', chunk => body += chunk);
@@ -195,7 +219,14 @@ class CDPHandler {
 
     async _connect(id, url) {
         return new Promise((resolve) => {
-            const ws = new WebSocket(url);
+            let ws;
+            try {
+                ws = new WebSocket(url);
+            } catch (e) {
+                resolve(false);
+                return;
+            }
+
             const timeout = setTimeout(() => {
                 try { ws.terminate(); } catch (e) { }
                 resolve(false);
@@ -207,16 +238,53 @@ class CDPHandler {
                 this.log(`Connected to page ${id}`);
                 resolve(true);
             });
-            ws.on('error', () => {
+            ws.on('error', (err) => {
                 clearTimeout(timeout);
                 resolve(false);
             });
             ws.on('close', () => {
                 clearTimeout(timeout);
+                const wasConnected = this.connections.has(id);
                 this.connections.delete(id);
-                this.log(`Disconnected from page ${id}`);
+                if (wasConnected) {
+                    this.log(`Disconnected from page ${id}`);
+                    // Auto-reconnect if still enabled
+                    this._scheduleReconnect(id);
+                }
             });
         });
+    }
+
+    /**
+     * Schedule a reconnection attempt after disconnect.
+     */
+    _scheduleReconnect(id) {
+        if (!this.isEnabled) return;
+
+        // Clear existing reconnect timer for this id
+        if (this._reconnectTimers.has(id)) {
+            clearTimeout(this._reconnectTimers.get(id));
+        }
+
+        const wsUrl = this._targetUrls.get(id);
+        if (!wsUrl) return;
+
+        const timer = setTimeout(async () => {
+            this._reconnectTimers.delete(id);
+            if (!this.isEnabled) return;
+            if (this.connections.has(id)) return; // Already reconnected
+
+            this.log(`Attempting reconnect to ${id}...`);
+            const success = await this._connect(id, wsUrl);
+            if (success) {
+                this.log(`Reconnected to ${id}`);
+            } else {
+                // Will be picked up by next start() scan
+                this._targetUrls.delete(id);
+            }
+        }, RECONNECT_DELAY_MS);
+
+        this._reconnectTimers.set(id, timer);
     }
 
     async _inject(id, config) {
@@ -246,9 +314,9 @@ class CDPHandler {
             if (!conn.injected) {
                 const script = getAutoContinueScript();
                 if (!quiet) {
-                    this.log(`Injecting auto-continue script into ${id} (${(script.length / 1024).toFixed(1)}KB)...`);
+                    this.log(`Injecting auto-continue v2 script into ${id} (${(script.length / 1024).toFixed(1)}KB)...`);
                 }
-                await this._safeEvaluate(id, script, 1);
+                await this._safeEvaluate(id, script, 2);
                 conn.injected = true;
                 if (!quiet) {
                     this.log(`Script injected into ${id}`);
@@ -267,7 +335,8 @@ class CDPHandler {
             if (!isRunning) {
                 const configJson = JSON.stringify({
                     maxRetries: config.maxRetries || 50,
-                    retryCooldownMs: config.retryCooldownMs || 3000,
+                    retryCooldownMs: config.retryCooldownMs || 5000,
+                    retryDelaySeconds: config.retryDelaySeconds || 5,
                     pollInterval: config.pollInterval || 500,
                     isBackgroundMode: !!config.isBackgroundMode
                 });
@@ -289,7 +358,7 @@ class CDPHandler {
             } catch (e) {
                 if (attempts >= retries) throw e;
                 attempts += 1;
-                await new Promise(r => setTimeout(r, 120));
+                await new Promise(r => setTimeout(r, 150));
             }
         }
     }
@@ -303,7 +372,7 @@ class CDPHandler {
             const timeout = setTimeout(() => {
                 conn.ws.off('message', onMessage);
                 reject(new Error('CDP Timeout'));
-            }, 4500);
+            }, 5000);
 
             const onMessage = (data) => {
                 try {
@@ -313,7 +382,7 @@ class CDPHandler {
                         clearTimeout(timeout);
                         resolve(msg.result);
                     }
-                } catch (e) {}
+                } catch (e) { }
             };
 
             conn.ws.on('message', onMessage);
@@ -336,7 +405,16 @@ class CDPHandler {
     }
 
     async getStats() {
-        const stats = { retries: 0, errorsDetected: 0, lastError: '', lastRetryAt: '', consecutiveRetries: 0 };
+        const stats = {
+            retries: 0,
+            errorsDetected: 0,
+            lastError: '',
+            lastRetryAt: '',
+            consecutiveRetries: 0,
+            countdownActive: false,
+            countdownSecondsLeft: 0,
+            retryHistory: []
+        };
         for (const [id] of this.connections) {
             try {
                 const res = await this._evaluate(id, 'JSON.stringify(window.__autoContinueGetStats ? window.__autoContinueGetStats() : {})');
@@ -345,11 +423,16 @@ class CDPHandler {
                     stats.retries += s.retries || 0;
                     stats.errorsDetected += s.errorsDetected || 0;
                     stats.consecutiveRetries = Math.max(stats.consecutiveRetries, s.consecutiveRetries || 0);
+                    if (s.countdownActive) stats.countdownActive = true;
+                    stats.countdownSecondsLeft = Math.max(stats.countdownSecondsLeft, s.countdownSecondsLeft || 0);
                     if (s.lastError) {
                         stats.lastError = s.lastError;
                     }
                     if (s.lastRetryAt) {
                         stats.lastRetryAt = s.lastRetryAt;
+                    }
+                    if (Array.isArray(s.retryHistory) && s.retryHistory.length > 0) {
+                        stats.retryHistory = s.retryHistory;
                     }
                 }
             } catch (e) { }
