@@ -445,6 +445,9 @@
     // CORE TICK — called by observer + interval
     // =================================================================
 
+    let _lastTickLog = 0;
+    let _tickCount = 0;
+
     function tick(state) {
         if (!state.isRunning) return;
         if (state.countdownActive) return;
@@ -466,10 +469,20 @@
             return;
         }
 
-        if (isUserTyping()) return;
+        // NOTE: We do NOT check isUserTyping() here because in Antigravity
+        // the editor is always a textarea/contentEditable and the check
+        // would block ALL scanning permanently.
+
+        _tickCount++;
 
         // 1. Detect error anywhere on the page
         const error = detectError();
+
+        // Periodic logging (every 30s) to confirm scanning is alive
+        if (now - _lastTickLog > 30000) {
+            _lastTickLog = now;
+            log(`Tick #${_tickCount}: scanning active, error=${error.found ? error.pattern : 'none'}`);
+        }
 
         if (!error.found) {
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
@@ -482,7 +495,14 @@
 
         // 2. Find retry buttons
         const buttons = findRetryButtons();
-        if (buttons.length === 0) return;
+        if (buttons.length === 0) {
+            // Log this once per error detection
+            if (error.pattern !== state._lastNoButtonPattern) {
+                log(`Error "${error.pattern}" found but no Retry button visible`);
+                state._lastNoButtonPattern = error.pattern;
+            }
+            return;
+        }
 
         // 3. Dedup
         const sig = error.pattern;
