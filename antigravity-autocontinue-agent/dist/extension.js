@@ -3883,6 +3883,7 @@ var require_cdp_handler = __commonJS({
                 const id = `${port}:${page.id}`;
                 if (!this.connections.has(id)) {
                   this._targetUrls.set(id, page.webSocketDebuggerUrl);
+                  this.log(`Target ${id}: type=${page.type} url=${(page.url || "").slice(0, 120)}`);
                   await this._connect(id, page.webSocketDebuggerUrl);
                 }
                 await this._inject(id, config);
@@ -4013,7 +4014,6 @@ var require_cdp_handler = __commonJS({
         const conn = this.connections.get(id);
         if (!conn)
           return;
-        const quiet = !!config?.quiet;
         try {
           if (conn.injected) {
             try {
@@ -4021,9 +4021,7 @@ var require_cdp_handler = __commonJS({
               const exists = !!existsRes?.result?.value;
               if (!exists) {
                 conn.injected = false;
-                if (!quiet) {
-                  this.log(`Script missing in ${id}; reinjecting...`);
-                }
+                this.log(`Script missing in ${id}; reinjecting...`);
               }
             } catch (e) {
               conn.injected = false;
@@ -4031,13 +4029,17 @@ var require_cdp_handler = __commonJS({
           }
           if (!conn.injected) {
             const script = getAutoContinueScript();
-            if (!quiet) {
-              this.log(`Injecting auto-continue v2 script into ${id} (${(script.length / 1024).toFixed(1)}KB)...`);
-            }
-            await this._safeEvaluate(id, script, 2);
+            this.log(`Injecting script into ${id} (${(script.length / 1024).toFixed(1)}KB)...`);
+            const injectResult = await this._safeEvaluate(id, script, 2);
             conn.injected = true;
-            if (!quiet) {
-              this.log(`Script injected into ${id}`);
+            this.log(`Script injected into ${id}`);
+            try {
+              const diagRes = await this._evaluate(id, 'JSON.stringify({title: document.title, bodyLen: (document.body?.textContent||"" ).length, url: location.href.slice(0,150)})');
+              if (diagRes?.result?.value) {
+                const diag = JSON.parse(diagRes.result.value);
+                this.log(`  \u2192 Page: "${diag.title}" | body=${diag.bodyLen} chars | url=${diag.url}`);
+              }
+            } catch (e) {
             }
           }
           let isRunning = false;
@@ -4055,9 +4057,7 @@ var require_cdp_handler = __commonJS({
               pollInterval: config.pollInterval || 500,
               isBackgroundMode: !!config.isBackgroundMode
             });
-            if (!quiet) {
-              this.log(`Calling __autoContinueStart in ${id}`);
-            }
+            this.log(`Calling __autoContinueStart in ${id}`);
             await this._safeEvaluate(id, `if(window.__autoContinueStart) window.__autoContinueStart(${configJson})`, 1);
           }
         } catch (e) {
