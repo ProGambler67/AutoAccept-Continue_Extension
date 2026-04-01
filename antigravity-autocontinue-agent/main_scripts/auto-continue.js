@@ -1,14 +1,14 @@
 /**
- * Antigravity AutoContinue Agent v2.1 — Injected DOM Script
+ * Antigravity AutoContinue Agent v2.2 — Injected DOM Script
  *
- * Detects Antigravity error/termination dialogs and clicks the Retry button
- * after a visible countdown timer.
- *
- * RULES:
- *  1. NEVER type into chat — only click real Retry/Continue buttons.
- *  2. Wait retryDelaySeconds with a visible countdown, then click.
- *  3. If no Retry button is found, do nothing.
- *  4. Robust: wrapped in try/finally, never leaves state stuck.
+ * Detects errors anywhere on the page, finds Retry buttons, counts down, clicks.
+ * 
+ * v2.2 fixes:
+ *  - Scans ENTIRE body for error text (v2.1 was too narrow, missed errors)
+ *  - Countdown wrapped in try/finally (never gets stuck)
+ *  - No re-check during countdown (just count down and click)
+ *  - Triple click dispatch (click + MouseEvent + PointerEvent)
+ *  - NEVER types into chat
  */
 (function () {
     'use strict';
@@ -16,51 +16,18 @@
     if (typeof window === 'undefined') return;
     if (window.__autoContinueStart) return;
 
-    const log = (msg) => console.log(`[AutoContinue] ${msg}`);
-    log('Script v2.1 loaded');
-
-    // =================================================================
-    // DOM UTILITIES
-    // =================================================================
-
-    const queryAll = (selector) => {
-        const results = [];
-        const seen = new Set();
-        try {
-            const nodes = Array.from(document.querySelectorAll(selector));
-            for (const node of nodes) {
-                if (!seen.has(node)) {
-                    seen.add(node);
-                    results.push(node);
-                }
-            }
-        } catch (e) { }
-        // Also check shadow roots
-        try {
-            const allEls = document.querySelectorAll('*');
-            for (const el of allEls) {
-                if (el.shadowRoot) {
-                    try {
-                        const shadowNodes = Array.from(el.shadowRoot.querySelectorAll(selector));
-                        for (const node of shadowNodes) {
-                            if (!seen.has(node)) {
-                                seen.add(node);
-                                results.push(node);
-                            }
-                        }
-                    } catch (e) { }
-                }
-            }
-        } catch (e) { }
-        return results;
+    const LOG_PREFIX = '[AutoContinue]';
+    const log = (msg) => {
+        try { console.log(`${LOG_PREFIX} ${msg}`); } catch (e) { }
     };
+    log('Script v2.2 loaded');
 
     // =================================================================
-    // ERROR PATTERNS — only Antigravity termination/server errors
+    // ERROR PATTERNS
     // =================================================================
 
     const ERROR_PATTERNS = [
-        // Antigravity agent termination (PRIMARY — this is what we mainly target)
+        // Antigravity agent termination (PRIMARY target)
         'agent terminated due to error',
         'agent execution terminated due to error',
         'terminated due to error',
@@ -70,10 +37,11 @@
         'server capacity',
         'server traffic too high',
         'server is overloaded',
-        'server overloaded',
+        'servers are experiencing high traffic',
         'service unavailable',
+        'temporarily unavailable',
 
-        // Rate limiting (only the specific message forms)
+        // Rate limiting
         'rate limit exceeded',
         'too many requests',
 
@@ -96,28 +64,56 @@
         'an error occurred'
     ];
 
-    // =================================================================
-    // FIND RETRY BUTTON — scan the entire visible page
-    // =================================================================
-
-    const RETRY_PATTERNS = [
-        { re: /\bretry\b/i, priority: 100 },
-        { re: /\btry\s*again\b/i, priority: 95 },
-        { re: /\bcontinue\s*generating\b/i, priority: 90 },
-        { re: /\bcontinue\b/i, priority: 80 },
-        { re: /\bregenerate\b/i, priority: 75 },
-        { re: /\bresend\b/i, priority: 70 },
-        { re: /\bresume\b/i, priority: 65 }
+    // Text that means we should NOT match (false positive guards)
+    const FALSE_POSITIVE_GUARDS = [
+        'autocontinue',
+        'auto continue',
+        'auto accept',
+        'error handling',
+        'error detection',
+        'catch error',
+        'throw error',
+        'console.error',
+        'handle error',
+        'error boundary'
     ];
 
-    const NEGATIVE_RE = /\b(cancel|stop|reject|deny|block|disable|never|discard|delete|remove|close|dismiss|no thanks|not now|abort|copy|debug)\b/i;
+    // =================================================================
+    // DOM HELPERS
+    // =================================================================
 
-    function getButtonText(el) {
-        if (!el) return '';
-        const text = (el.textContent || '').trim();
-        const title = (el.title || '').trim();
-        const aria = (el.getAttribute && el.getAttribute('aria-label')) || '';
-        return `${text} ${title} ${aria}`.toLowerCase().replace(/\s+/g, ' ').trim();
+    function getAllRoots() {
+        const roots = [document];
+        try {
+            const walk = (root) => {
+                if (!root) return;
+                const els = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (const el of els) {
+                    if (el.shadowRoot) {
+                        roots.push(el.shadowRoot);
+                        walk(el.shadowRoot);
+                    }
+                }
+            };
+            walk(document);
+        } catch (e) { }
+        return roots;
+    }
+
+    function qAll(selector) {
+        const results = [];
+        const seen = new Set();
+        for (const root of getAllRoots()) {
+            try {
+                for (const el of root.querySelectorAll(selector)) {
+                    if (!seen.has(el)) {
+                        seen.add(el);
+                        results.push(el);
+                    }
+                }
+            } catch (e) { }
+        }
+        return results;
     }
 
     function isVisible(el) {
@@ -125,237 +121,255 @@
         try {
             const r = el.getBoundingClientRect();
             if (r.width <= 0 || r.height <= 0) return false;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-            return true;
+            const s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden';
         } catch (e) { return false; }
     }
 
-    function isInExcludedZone(el) {
-        if (!el) return true;
+    function getElText(el) {
+        if (!el) return '';
         try {
-            // Never click our own UI
-            const t = getButtonText(el);
-            if (/autocontinue|auto.continue|auto.accept/i.test(t)) return true;
-
-            // Never click status bar
-            if (el.closest('.statusbar, .part.statusbar, #workbench\\.parts\\.statusbar')) return true;
-
-            // OK to click if inside a dialog/notification/toast
-            if (el.closest('[role="dialog"], .notification-toast, .notification-list-item, .monaco-dialog-box, .monaco-dialog-modal-block')) {
-                return false;
-            }
-
-            // Don't click workbench chrome (title bar, sidebar, tabs etc.)
-            if (el.closest('.titlebar, .menubar, .activitybar, .sidebar, .tabs-container')) return true;
-
-            return false;
-        } catch (e) { return true; }
+            return ((el.textContent || '') + ' ' + (el.title || '') + ' ' +
+                ((el.getAttribute && el.getAttribute('aria-label')) || '')).toLowerCase().replace(/\s+/g, ' ').trim();
+        } catch (e) { return ''; }
     }
 
-    /**
-     * Find ALL visible retry/continue buttons on the page.
-     * Returns sorted array, best match first. Empty if none found.
-     */
-    function findAllRetryButtons() {
-        const candidates = [];
-        const seen = new Set();
-
-        // Search broadly: all buttons and button-like elements
-        const allButtons = queryAll('button, [role="button"], a[role="button"]');
-
-        for (const btn of allButtons) {
-            if (seen.has(btn)) continue;
-            seen.add(btn);
-
-            if (!isVisible(btn)) continue;
-            if (isInExcludedZone(btn)) continue;
-
-            const text = getButtonText(btn);
-            if (!text) continue;
-            if (NEGATIVE_RE.test(text)) continue;
-
-            for (const rp of RETRY_PATTERNS) {
-                if (rp.re.test(text)) {
-                    // Bonus priority if the button is inside a dialog/notification
-                    const inDialog = !!btn.closest('[role="dialog"], .notification-toast, .notification-list-item, .monaco-dialog-box, .monaco-dialog-modal-block');
-                    candidates.push({
-                        btn,
-                        text: text.slice(0, 80),
-                        priority: rp.priority + (inDialog ? 50 : 0),
-                        label: text.replace(/\s+/g, '-').slice(0, 30)
-                    });
-                    break;
-                }
-            }
-        }
-
-        candidates.sort((a, b) => b.priority - a.priority);
-        return candidates;
+    function isUserTyping() {
+        try {
+            const a = document.activeElement;
+            if (!a) return false;
+            const tag = (a.tagName || '').toLowerCase();
+            if (tag === 'textarea') return true;
+            if (tag === 'input' && !['button', 'submit', 'checkbox', 'radio'].includes((a.type || '').toLowerCase())) return true;
+            if (a.isContentEditable) return true;
+        } catch (e) { }
+        return false;
     }
 
     // =================================================================
-    // DETECT ERROR — check if any visible UI element has error text
+    // ERROR DETECTION — scan the entire page
     // =================================================================
 
-    /**
-     * Scans notification / dialog / toast containers for error patterns.
-     * Returns { found: boolean, pattern: string } 
-     */
     function detectError() {
-        // Scan specific UI containers where Antigravity shows errors
-        const containers = queryAll(
-            '[role="dialog"], .notification-toast, .notification-list-item, ' +
-            '.monaco-dialog-box, .monaco-dialog-modal-block, ' +
-            '[class*="notification"], [class*="toast"], [class*="alert"], ' +
-            '[class*="error-message"], [class*="error-banner"]'
-        );
+        // Strategy: scan the full body text for error patterns.
+        // This is what v2.0 did and it WORKED.
+        // But skip if the text contains code (false positive guard).
 
-        for (const container of containers) {
-            if (!isVisible(container)) continue;
+        const bodyText = (() => {
             try {
-                const text = (container.textContent || '').toLowerCase();
-                // Quick guard: skip containers with our own text
-                if (text.includes('autocontinue')) continue;
-                // Skip very large containers (likely the whole page, not a notification)
-                if (text.length > 5000) continue;
+                return (document.body?.textContent || '').toLowerCase();
+            } catch (e) { return ''; }
+        })();
 
-                for (const pattern of ERROR_PATTERNS) {
-                    if (text.includes(pattern)) {
-                        return { found: true, pattern };
-                    }
-                }
-            } catch (e) { }
-        }
+        if (!bodyText) return { found: false, pattern: '' };
 
-        // Also check the chat area for specific Antigravity error messages
-        // (these appear inline in the conversation)
-        const chatAreas = queryAll(
-            '.interactive-session, .chat-response, .chat-tool-response, ' +
-            '[class*="response"], .antigravity-agent-side-panel'
-        );
-        for (const area of chatAreas) {
-            if (!isVisible(area)) continue;
-            try {
-                const text = (area.textContent || '').toLowerCase();
-                if (text.includes('autocontinue')) continue;
-                if (text.length > 10000) continue;
+        for (const pattern of ERROR_PATTERNS) {
+            if (!bodyText.includes(pattern)) continue;
 
-                // Only match the most critical Antigravity errors in chat
-                const criticalPatterns = [
-                    'agent terminated due to error',
-                    'agent execution terminated due to error',
-                    'terminated due to error',
-                    'continue generating'
-                ];
-                for (const pattern of criticalPatterns) {
-                    if (text.includes(pattern)) {
-                        return { found: true, pattern };
-                    }
-                }
-            } catch (e) { }
+            // False positive check: is this pattern in code/docs context?
+            // Count how many code indicators are near the pattern
+            const patternIdx = bodyText.indexOf(pattern);
+            // Get ~500 chars around the match for context
+            const contextStart = Math.max(0, patternIdx - 250);
+            const contextEnd = Math.min(bodyText.length, patternIdx + pattern.length + 250);
+            const context = bodyText.slice(contextStart, contextEnd);
+
+            // Skip if context looks like code
+            const codeIndicators = ['function ', 'const ', 'let ', 'var ', 'import ', 'console.', '===', 'catch(', 'catch (', 'throw '];
+            const codeHits = codeIndicators.filter(c => context.includes(c)).length;
+            if (codeHits >= 3) continue;
+
+            // Skip if context has our own UI text
+            if (FALSE_POSITIVE_GUARDS.some(g => context.includes(g))) continue;
+
+            log(`Error detected: "${pattern}"`);
+            return { found: true, pattern };
         }
 
         return { found: false, pattern: '' };
     }
 
     // =================================================================
-    // CLICK BUTTON
+    // RETRY BUTTON FINDING
     // =================================================================
 
-    function clickRetryButton(btn, reason) {
+    const RETRY_BUTTON_PATTERNS = [
+        { re: /\bretry\b/i, score: 100 },
+        { re: /\btry\s*again\b/i, score: 95 },
+        { re: /\bcontinue\s*generating\b/i, score: 90 },
+        { re: /\bcontinue\b/i, score: 80 },
+        { re: /\bregenerate\b/i, score: 75 },
+        { re: /\bresend\b/i, score: 70 },
+        { re: /\bresume\b/i, score: 65 }
+    ];
+
+    const BAD_BUTTON_RE = /\b(cancel|stop|reject|deny|block|disable|never|discard|delete|remove|close|dismiss|not now|abort|copy|debug|settings?|configure|manage|open|show)\b/i;
+
+    function findRetryButtons() {
+        const candidates = [];
+        const seen = new Set();
+
+        // Get ALL buttons from ALL roots (including shadow DOM)
+        const buttons = qAll('button, [role="button"], a[role="button"]');
+
+        for (const btn of buttons) {
+            if (seen.has(btn)) continue;
+            seen.add(btn);
+            if (!isVisible(btn)) continue;
+
+            // Skip our own UI
+            try {
+                if (btn.closest('#__ac-countdown-badge, #__ac-bg-overlay')) continue;
+            } catch (e) { }
+
+            // Skip status bar
+            try {
+                if (btn.closest('.statusbar, .part.statusbar, #workbench\\.parts\\.statusbar')) continue;
+            } catch (e) { }
+
+            // Skip workbench chrome UNLESS inside a dialog/notification
+            try {
+                const inDialog = !!btn.closest('[role="dialog"], .notification-toast, .notification-list-item, .monaco-dialog-box, .monaco-dialog-modal-block, [class*="notification"], [class*="toast"]');
+                const inChrome = !!btn.closest('.titlebar, .menubar, .activitybar, .sidebar, .tabs-container, .editor-actions');
+                if (inChrome && !inDialog) continue;
+            } catch (e) { }
+
+            const text = getElText(btn);
+            if (!text) continue;
+
+            // Skip buttons with bad keywords
+            if (BAD_BUTTON_RE.test(text)) continue;
+
+            // Skip our own UI buttons
+            if (/autocontinue|auto.continue|auto.accept/i.test(text)) continue;
+
+            // Match against retry patterns
+            for (const rp of RETRY_BUTTON_PATTERNS) {
+                if (rp.re.test(text)) {
+                    // Bonus: buttons in dialog/notification get +50
+                    let bonus = 0;
+                    try {
+                        if (btn.closest('[role="dialog"], .notification-toast, .notification-list-item, .monaco-dialog-box, .monaco-dialog-modal-block, [class*="notification"], [class*="toast"]')) {
+                            bonus = 50;
+                        }
+                    } catch (e) { }
+
+                    candidates.push({ btn, text: text.slice(0, 80), score: rp.score + bonus, label: rp.re.source.replace(/[\\\b]/g, '') });
+                    break;
+                }
+            }
+        }
+
+        candidates.sort((a, b) => b.score - a.score);
+
+        if (candidates.length > 0) {
+            log(`Found ${candidates.length} retry button(s). Best: "${candidates[0].text}" (score=${candidates[0].score})`);
+        }
+
+        return candidates;
+    }
+
+    // =================================================================
+    // CLICK BUTTON — triple dispatch for maximum reliability
+    // =================================================================
+
+    function clickBtn(btn, reason) {
         if (!btn) return false;
         try {
-            if (!isVisible(btn)) return false;
+            if (!isVisible(btn)) {
+                log(`Button not visible, skipping click`);
+                return false;
+            }
 
-            // Double-click guard
             const now = Date.now();
-            const lastClick = Number(btn.getAttribute && btn.getAttribute('data-ac-ts') || 0);
-            if (lastClick > 0 && (now - lastClick) < 4000) return false;
+            // Guard: don't click the same button within 4 seconds
+            try {
+                const lastTs = Number(btn.getAttribute('data-ac-ts') || 0);
+                if (lastTs > 0 && (now - lastTs) < 4000) {
+                    log('Skipping click: too soon since last click on this button');
+                    return false;
+                }
+            } catch (e) { }
 
-            // Focus the button first
+            const rect = btn.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+
+            // 1. Focus
             try { btn.focus(); } catch (e) { }
 
-            // Method 1: native click
+            // 2. Pointer events
+            try {
+                btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+                btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+            } catch (e) { }
+
+            // 3. Mouse events
+            try {
+                btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+                btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+                btn.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+            } catch (e) { }
+
+            // 4. Native click
             try { btn.click(); } catch (e) { }
 
-            // Method 2: MouseEvent
-            try {
-                const rect = btn.getBoundingClientRect();
-                btn.dispatchEvent(new MouseEvent('click', {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: rect.left + rect.width / 2,
-                    clientY: rect.top + rect.height / 2
-                }));
-            } catch (e) { }
-
-            // Method 3: PointerEvent (some frameworks use this)
-            try {
-                const rect = btn.getBoundingClientRect();
-                btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-                btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-            } catch (e) { }
-
+            // Stamp
             try { btn.setAttribute('data-ac-ts', String(now)); } catch (e) { }
 
-            log(`CLICKED: "${getButtonText(btn).slice(0, 60)}" [${reason}]`);
+            log(`✓ CLICKED: "${getElText(btn).slice(0, 60)}" [${reason}]`);
             return true;
         } catch (e) {
-            log(`Click failed: ${e.message}`);
+            log(`Click error: ${e.message}`);
             return false;
         }
     }
 
     // =================================================================
-    // COUNTDOWN TIMER UI (floating badge)
+    // COUNTDOWN BADGE UI
     // =================================================================
 
     const BADGE_ID = '__ac-countdown-badge';
 
-    function showCountdown(seconds, pattern) {
+    function showBadge(secs, pattern) {
         try {
-            let badge = document.getElementById(BADGE_ID);
-            if (!badge) {
-                badge = document.createElement('div');
-                badge.id = BADGE_ID;
-                badge.style.cssText = 'position:fixed;bottom:60px;right:20px;z-index:999998;' +
+            let el = document.getElementById(BADGE_ID);
+            if (!el) {
+                el = document.createElement('div');
+                el.id = BADGE_ID;
+                el.style.cssText = 'position:fixed;bottom:60px;right:20px;z-index:999998;' +
                     'background:linear-gradient(135deg,#1a1a2e,#16213e);border:2px solid #00d4aa;' +
                     'border-radius:16px;padding:16px 24px;font-family:system-ui,sans-serif;' +
                     'color:#e6edf3;box-shadow:0 8px 32px rgba(0,212,170,0.3);pointer-events:none;' +
                     'user-select:none;min-width:180px;text-align:center;';
-                (document.body || document.documentElement).appendChild(badge);
+                (document.body || document.documentElement).appendChild(el);
             }
-            badge.innerHTML =
+            const safe = (pattern || 'error').replace(/</g, '&lt;').slice(0, 50);
+            el.innerHTML =
                 '<div style="font-size:10px;color:#8b99a8;letter-spacing:1px;margin-bottom:6px;">⚡ AUTOCONTINUE</div>' +
-                '<div style="font-size:11px;color:#ffb2ab;margin-bottom:10px;max-width:200px;word-break:break-word;">' +
-                    (pattern || 'error').slice(0, 50) + '</div>' +
+                '<div style="font-size:11px;color:#ffb2ab;margin-bottom:10px;">' + safe + '</div>' +
                 '<div style="font-size:48px;font-weight:800;background:linear-gradient(135deg,#00d4aa,#00e5bf);' +
                     '-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;">' +
-                    seconds + '</div>' +
-                '<div style="font-size:11px;color:#8b99a8;margin-top:6px;">Clicking Retry in ' + seconds + 's</div>';
+                    secs + '</div>' +
+                '<div style="font-size:11px;color:#8b99a8;margin-top:6px;">Clicking Retry in ' + secs + 's</div>';
         } catch (e) { }
     }
 
-    function hideCountdown() {
-        try {
-            const badge = document.getElementById(BADGE_ID);
-            if (badge) badge.remove();
-        } catch (e) { }
+    function hideBadge() {
+        try { const el = document.getElementById(BADGE_ID); if (el) el.remove(); } catch (e) { }
     }
 
     // =================================================================
     // BACKGROUND OVERLAY
     // =================================================================
 
-    const OVERLAY_ID = '__ac-bg-overlay';
+    const OV_ID = '__ac-bg-overlay';
 
-    function showOverlay(state) {
+    function showOverlay() {
         try {
-            if (document.getElementById(OVERLAY_ID)) return;
+            if (document.getElementById(OV_ID)) return;
             const el = document.createElement('div');
-            el.id = OVERLAY_ID;
+            el.id = OV_ID;
             el.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
                 'background:rgba(0,0,0,0.85);z-index:999999;display:flex;flex-direction:column;' +
                 'align-items:center;justify-content:center;font-family:system-ui,sans-serif;' +
@@ -364,25 +378,22 @@
                 '<div style="text-align:center;max-width:440px;padding:32px;">' +
                 '<div style="font-size:48px;margin-bottom:16px;animation:acP 2s ease-in-out infinite;">⚡</div>' +
                 '<div style="font-size:22px;font-weight:700;margin-bottom:8px;background:linear-gradient(135deg,#00d4aa,#00e5bf);' +
-                    '-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">AutoContinue — Background Mode</div>' +
-                '<div style="font-size:13px;color:#8b99a8;margin-bottom:24px;">Scanning for errors. Retries happen automatically.</div>' +
+                '-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">AutoContinue — Background Mode</div>' +
+                '<div style="font-size:13px;color:#8b99a8;margin-bottom:24px;">Scanning for errors and retrying automatically.</div>' +
                 '<div style="display:flex;gap:20px;justify-content:center;">' +
-                    '<div style="text-align:center;padding:12px 20px;background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);border-radius:12px;">' +
-                        '<div style="font-size:28px;font-weight:800;color:#00d4aa;" id="__ac-bg-r">0</div>' +
-                        '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Retries</div></div>' +
-                    '<div style="text-align:center;padding:12px 20px;background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.2);border-radius:12px;">' +
-                        '<div style="font-size:28px;font-weight:800;color:#f85149;" id="__ac-bg-e">0</div>' +
-                        '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Errors</div></div>' +
-                    '<div style="text-align:center;padding:12px 20px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.2);border-radius:12px;">' +
-                        '<div style="font-size:28px;font-weight:800;color:#d29922;" id="__ac-bg-c">—</div>' +
-                        '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Countdown</div></div>' +
-                '</div>' +
-                '<div style="margin-top:20px;font-size:11px;color:#555;padding:8px 16px;border:1px solid #1e2a3a;border-radius:8px;background:rgba(0,0,0,0.3);">' +
-                    'Press <kbd style="background:#1e2a3a;padding:2px 6px;border-radius:4px;color:#8b99a8;">Ctrl+Shift+B</kbd> to exit</div>' +
-                '</div>' +
+                '<div style="text-align:center;padding:12px 20px;background:rgba(0,212,170,0.08);border:1px solid rgba(0,212,170,0.2);border-radius:12px;">' +
+                '<div style="font-size:28px;font-weight:800;color:#00d4aa;" id="__ac-bg-r">0</div>' +
+                '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;margin-top:4px;">Retries</div></div>' +
+                '<div style="text-align:center;padding:12px 20px;background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.2);border-radius:12px;">' +
+                '<div style="font-size:28px;font-weight:800;color:#f85149;" id="__ac-bg-e">0</div>' +
+                '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;margin-top:4px;">Errors</div></div>' +
+                '<div style="text-align:center;padding:12px 20px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.2);border-radius:12px;">' +
+                '<div style="font-size:28px;font-weight:800;color:#d29922;" id="__ac-bg-c">—</div>' +
+                '<div style="font-size:10px;color:#8b99a8;text-transform:uppercase;margin-top:4px;">Countdown</div></div>' +
+                '</div></div>' +
                 '<style>@keyframes acP{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.05);opacity:.7}}</style>';
             (document.body || document.documentElement).appendChild(el);
-            log('Background overlay mounted');
+            log('Overlay mounted');
         } catch (e) { }
     }
 
@@ -398,15 +409,11 @@
     }
 
     function hideOverlay() {
-        try {
-            const el = document.getElementById(OVERLAY_ID);
-            if (el) el.remove();
-            log('Background overlay removed');
-        } catch (e) { }
+        try { const el = document.getElementById(OV_ID); if (el) el.remove(); } catch (e) { }
     }
 
     // =================================================================
-    // MAIN ENGINE
+    // STATE
     // =================================================================
 
     if (!window.__autoContinueState) {
@@ -427,36 +434,31 @@
             countdownActive: false,
             countdownSecondsLeft: 0,
             pausedForMaxRetries: false,
-            pollInterval: 500,
             _interval: null,
             _observer: null,
-            _overlayInterval: null,
+            _ovInterval: null,
             retryHistory: []
         };
     }
 
-    /**
-     * Core scan: detect error → find button → start countdown → click.
-     * This is synchronous except when countdown is triggered.
-     */
+    // =================================================================
+    // CORE TICK — called by observer + interval
+    // =================================================================
+
     function tick(state) {
         if (!state.isRunning) return;
-        if (state.countdownActive) return; // Countdown in progress
+        if (state.countdownActive) return;
 
         const now = Date.now();
-
-        // Cooldown after last retry
         if ((now - state.lastRetryAt) < state.retryCooldownMs) return;
 
-        // Max retries check
         if (state.consecutiveRetries >= state.maxRetries) {
             if (!state.pausedForMaxRetries) {
-                log(`Paused: hit ${state.maxRetries} consecutive retries`);
+                log(`Paused: ${state.maxRetries} consecutive retries`);
                 state.pausedForMaxRetries = true;
             }
-            // Check if error cleared
-            const check = detectError();
-            if (!check.found) {
+            const e = detectError();
+            if (!e.found) {
                 state.consecutiveRetries = 0;
                 state.pausedForMaxRetries = false;
                 log('Error cleared, unpaused');
@@ -464,24 +466,13 @@
             return;
         }
 
-        // Don't interfere with typing
-        try {
-            const active = document.activeElement;
-            if (active) {
-                const tag = (active.tagName || '').toLowerCase();
-                if (tag === 'textarea' || (tag === 'input' && !['button', 'submit', 'checkbox', 'radio'].includes((active.type || '').toLowerCase())) || active.isContentEditable) {
-                    return;
-                }
-            }
-        } catch (e) { }
+        if (isUserTyping()) return;
 
-        // Detect error
+        // 1. Detect error anywhere on the page
         const error = detectError();
 
         if (!error.found) {
-            // Error cleared — reset consecutive counter after 10s of no errors
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
-                log(`No errors for 10s. Resetting counter (was ${state.consecutiveRetries}).`);
                 state.consecutiveRetries = 0;
                 state.lastHandledSig = '';
                 state.pausedForMaxRetries = false;
@@ -489,88 +480,79 @@
             return;
         }
 
-        // Find retry buttons
-        const buttons = findAllRetryButtons();
-        if (buttons.length === 0) {
-            // Error detected but no retry button visible
-            return;
-        }
+        // 2. Find retry buttons
+        const buttons = findRetryButtons();
+        if (buttons.length === 0) return;
 
-        // Deduplication — don't handle the exact same error within 2x cooldown
+        // 3. Dedup
         const sig = error.pattern;
-        if (sig === state.lastHandledSig && (now - state.lastRetryAt) < state.retryCooldownMs * 2) {
-            return;
-        }
+        if (sig === state.lastHandledSig && (now - state.lastRetryAt) < state.retryCooldownMs * 2) return;
 
         state.errorsDetected++;
         state.lastError = error.pattern;
-        log(`Error: "${error.pattern}" | Found ${buttons.length} retry button(s): "${buttons[0].text}"`);
 
-        // Start countdown then click
+        // 4. Start countdown and click
         doCountdownAndClick(state, error.pattern, buttons[0]);
     }
 
-    /**
-     * Countdown then click. Fully wrapped in try/finally.
-     * Does NOT re-scan during countdown — just counts down and clicks.
-     */
-    async function doCountdownAndClick(state, pattern, bestButton) {
+    // =================================================================
+    // COUNTDOWN → CLICK (async, try/finally guarded)
+    // =================================================================
+
+    async function doCountdownAndClick(state, pattern, bestMatch) {
         const delay = state.retryDelaySeconds || 5;
         state.countdownActive = true;
         state.countdownSecondsLeft = delay;
 
+        log(`⏱ Countdown: ${delay}s → click "${bestMatch.text}"`);
+
         try {
-            log(`Countdown: ${delay}s before clicking "${bestButton.text}"`);
-            showCountdown(delay, pattern);
+            showBadge(delay, pattern);
 
             for (let i = delay; i >= 1; i--) {
                 if (!state.isRunning) {
-                    log('Countdown cancelled: disabled');
+                    log('Countdown cancelled: extension disabled');
                     return;
                 }
-
                 state.countdownSecondsLeft = i;
-                showCountdown(i, pattern);
+                showBadge(i, pattern);
                 updateOverlay(state);
+                log(`⏱ ${i}...`);
 
-                // Wait 1 second
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(r => setTimeout(r, 1000));
             }
 
             state.countdownSecondsLeft = 0;
-            log('Countdown finished. Clicking now...');
+            log('⏱ 0 — clicking now!');
 
-            // Re-find buttons fresh (DOM may have changed during countdown)
-            const freshButtons = findAllRetryButtons();
-            const target = freshButtons.length > 0 ? freshButtons[0] : bestButton;
+            // Re-find buttons fresh (DOM may have changed)
+            const freshButtons = findRetryButtons();
+            const target = freshButtons.length > 0 ? freshButtons[0] : bestMatch;
 
-            const clicked = clickRetryButton(target.btn, 'countdown-' + target.label);
-            if (clicked) {
+            const ok = clickBtn(target.btn, 'countdown-complete');
+            if (ok) {
                 state.retries++;
                 state.consecutiveRetries++;
                 state.lastRetryAt = Date.now();
-                state.lastRetryAction = target.label;
+                state.lastRetryAction = target.label || 'retry';
                 state.lastHandledSig = pattern;
                 state.retryHistory.push({
                     at: new Date().toISOString(),
-                    pattern: pattern,
-                    action: target.label,
-                    consecutive: state.consecutiveRetries
+                    pattern,
+                    action: target.label || 'retry',
+                    n: state.consecutiveRetries
                 });
-                if (state.retryHistory.length > 50) {
-                    state.retryHistory = state.retryHistory.slice(-50);
-                }
-                log(`✓ Retry #${state.consecutiveRetries}: "${target.text}" [${target.label}]`);
+                if (state.retryHistory.length > 50) state.retryHistory = state.retryHistory.slice(-50);
+                log(`✓ Retry #${state.consecutiveRetries} complete`);
             } else {
-                log(`✗ Click did not succeed on "${target.text}"`);
+                log('✗ Click did not succeed');
             }
         } catch (err) {
-            log(`Countdown error: ${err.message}`);
+            log(`Countdown error: ${err.message || err}`);
         } finally {
-            // ALWAYS reset — never leave stuck
             state.countdownActive = false;
             state.countdownSecondsLeft = 0;
-            hideCountdown();
+            hideBadge();
             updateOverlay(state);
         }
     }
@@ -588,10 +570,10 @@
             lastError: s.lastError || '',
             lastRetryAction: s.lastRetryAction || '',
             lastRetryAt: s.lastRetryAt ? new Date(s.lastRetryAt).toISOString() : '',
-            isRunning: s.isRunning,
-            isBackgroundMode: s.isBackgroundMode || false,
-            pausedForMaxRetries: s.pausedForMaxRetries || false,
-            countdownActive: s.countdownActive || false,
+            isRunning: !!s.isRunning,
+            isBackgroundMode: !!s.isBackgroundMode,
+            pausedForMaxRetries: !!s.pausedForMaxRetries,
+            countdownActive: !!s.countdownActive,
             countdownSecondsLeft: s.countdownSecondsLeft || 0,
             retryHistory: (s.retryHistory || []).slice(-10)
         };
@@ -599,7 +581,6 @@
 
     window.__autoContinueStart = function (config) {
         const state = window.__autoContinueState;
-
         if (state.isRunning) {
             log('Restarting...');
             window.__autoContinueStop();
@@ -610,58 +591,53 @@
         state.maxRetries = config.maxRetries || 50;
         state.retryCooldownMs = config.retryCooldownMs || 5000;
         state.retryDelaySeconds = config.retryDelaySeconds || 5;
-        state.pollInterval = config.pollInterval || 500;
         state.isBackgroundMode = !!config.isBackgroundMode;
         state.consecutiveRetries = 0;
         state.lastRetryAt = 0;
-        state.lastRetryAction = '';
         state.lastError = '';
         state.lastHandledSig = '';
         state.countdownActive = false;
         state.countdownSecondsLeft = 0;
         state.pausedForMaxRetries = false;
 
-        log(`Started: delay=${state.retryDelaySeconds}s cooldown=${state.retryCooldownMs}ms poll=${state.pollInterval}ms bg=${state.isBackgroundMode}`);
+        log(`STARTED v2.2: delay=${state.retryDelaySeconds}s cooldown=${state.retryCooldownMs}ms bg=${state.isBackgroundMode}`);
 
-        // MutationObserver — instant detection
-        if (state._observer) {
-            try { state._observer.disconnect(); } catch (e) { }
-        }
+        // MutationObserver
+        if (state._observer) try { state._observer.disconnect(); } catch (e) { }
         try {
-            let lastObsTick = 0;
+            let lastT = 0;
             const obs = new MutationObserver(() => {
                 if (!state.isRunning) return;
-                const now = Date.now();
-                if (now - lastObsTick < 300) return; // Throttle: max 1 per 300ms
-                lastObsTick = now;
+                const n = Date.now();
+                if (n - lastT < 300) return;
+                lastT = n;
                 tick(state);
             });
-            obs.observe(document.documentElement || document.body, {
-                childList: true, subtree: true, attributes: true
-            });
+            obs.observe(document.documentElement || document.body, { childList: true, subtree: true, attributes: true });
             state._observer = obs;
-            log('MutationObserver started');
-        } catch (e) {
-            log(`MutationObserver failed: ${e.message}`);
-        }
+            log('MutationObserver active');
+        } catch (e) { log('Observer failed: ' + e.message); }
 
-        // Poll fallback
+        // Poll fallback (500ms)
         state._interval = setInterval(() => {
             if (state.isRunning) tick(state);
-        }, state.pollInterval);
-        log(`Poll started (${state.pollInterval}ms)`);
+        }, config.pollInterval || 500);
+        log('Poll active (' + (config.pollInterval || 500) + 'ms)');
 
         // Background overlay
         if (state.isBackgroundMode) {
-            showOverlay(state);
-            state._overlayInterval = setInterval(() => {
+            showOverlay();
+            state._ovInterval = setInterval(() => {
                 if (state.isRunning && state.isBackgroundMode) updateOverlay(state);
             }, 500);
         } else {
             hideOverlay();
         }
 
-        log('ACTIVE' + (state.isBackgroundMode ? ' [BG MODE]' : ''));
+        // Do an immediate scan
+        tick(state);
+
+        log('ACTIVE ✓');
     };
 
     window.__autoContinueStop = function () {
@@ -669,15 +645,13 @@
         state.isRunning = false;
         state.countdownActive = false;
         state.countdownSecondsLeft = 0;
-
         if (state._interval) { clearInterval(state._interval); state._interval = null; }
-        if (state._overlayInterval) { clearInterval(state._overlayInterval); state._overlayInterval = null; }
+        if (state._ovInterval) { clearInterval(state._ovInterval); state._ovInterval = null; }
         if (state._observer) { try { state._observer.disconnect(); } catch (e) { } state._observer = null; }
-
-        hideCountdown();
+        hideBadge();
         hideOverlay();
-        log(`Stopped. Retries: ${state.retries}, Errors: ${state.errorsDetected}`);
+        log('STOPPED. Retries: ' + state.retries + ' Errors: ' + state.errorsDetected);
     };
 
-    log('v2.1 Ready');
+    log('v2.2 Ready');
 })();
