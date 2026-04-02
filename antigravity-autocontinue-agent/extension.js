@@ -22,6 +22,7 @@ let enableNativeCommands = true;
 let lastControlPanelStatePushTs = 0;
 let cdpRefreshTimer;
 let nativeCommandTimer;
+let activePollingTimer;
 let lastNativeCommandAttemptTs = 0;
 
 const ENABLED_STATE_KEY = 'autocontinue-enabled';
@@ -290,6 +291,7 @@ async function startMonitoring() {
     if (pollTimer) clearInterval(pollTimer);
     if (cdpRefreshTimer) clearInterval(cdpRefreshTimer);
     if (nativeCommandTimer) clearInterval(nativeCommandTimer);
+    if (activePollingTimer) clearInterval(activePollingTimer);
 
     if (!cdpHandler) {
         log('No CDP handler available');
@@ -327,6 +329,19 @@ async function startMonitoring() {
         log('Native command fallback enabled');
     }
 
+    // Active polling from extension process — the core background mode fix.
+    // This runs in Node.js (never throttled), calling into each CDP target
+    // to detect errors and click retry buttons even when tabs are backgrounded.
+    activePollingTimer = setInterval(async () => {
+        if (!isEnabled || !cdpHandler) return;
+        try {
+            await cdpHandler.pollAndRetry();
+        } catch (e) {
+            // Silently ignore — individual target errors handled inside pollAndRetry
+        }
+    }, 3000);
+    log('Active polling enabled (3s interval)');
+
     log('Monitoring started (CDP re-scan: 2s)');
 }
 
@@ -360,6 +375,10 @@ async function stopMonitoring() {
     if (nativeCommandTimer) {
         clearInterval(nativeCommandTimer);
         nativeCommandTimer = null;
+    }
+    if (activePollingTimer) {
+        clearInterval(activePollingTimer);
+        activePollingTimer = null;
     }
     if (cdpHandler) {
         await cdpHandler.stop();
@@ -993,6 +1012,10 @@ function deactivate() {
     if (nativeCommandTimer) {
         clearInterval(nativeCommandTimer);
         nativeCommandTimer = null;
+    }
+    if (activePollingTimer) {
+        clearInterval(activePollingTimer);
+        activePollingTimer = null;
     }
     if (cdpHandler) {
         cdpHandler.stop().catch(() => {});

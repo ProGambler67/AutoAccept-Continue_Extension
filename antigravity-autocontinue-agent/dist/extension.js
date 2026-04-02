@@ -4152,6 +4152,43 @@ var require_cdp_handler = __commonJS({
         }
         return stats;
       }
+      /**
+       * Active polling from the extension process (Node.js — never throttled).
+       * Calls __autoContinuePollOnce() on every connected CDP target.
+       * This is the key mechanism that makes background mode work:
+       * even if the browser tab has its timers throttled, this CDP call
+       * executes synchronously in the target's JS context.
+       */
+      async pollAndRetry() {
+        if (!this.isEnabled)
+          return [];
+        const results = [];
+        for (const [id, conn] of this.connections) {
+          if (!conn || !conn.injected)
+            continue;
+          if (conn.ws.readyState !== 1)
+            continue;
+          try {
+            const res = await this._evaluate(
+              id,
+              'JSON.stringify(window.__autoContinuePollOnce ? window.__autoContinuePollOnce() : {skipped:"no-function"})'
+            );
+            if (res?.result?.value) {
+              const r = JSON.parse(res.result.value);
+              r.targetId = id;
+              results.push(r);
+              if (r.clicked) {
+                this.log(`[RemotePoll] Target ${id}: \u2713 CLICKED retry for "${r.pattern}"`);
+              } else if (r.errorFound && !r.buttonFound) {
+                this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
+              } else if (r.errorFound && r.buttonFound && r.skipped === "dedup") {
+              }
+            }
+          } catch (e) {
+          }
+        }
+        return results;
+      }
     };
     module2.exports = { CDPHandler };
   }
@@ -4180,6 +4217,7 @@ var enableNativeCommands = true;
 var lastControlPanelStatePushTs = 0;
 var cdpRefreshTimer;
 var nativeCommandTimer;
+var activePollingTimer;
 var lastNativeCommandAttemptTs = 0;
 var ENABLED_STATE_KEY = "autocontinue-enabled";
 var BACKGROUND_STATE_KEY = "autocontinue-background";
@@ -4383,6 +4421,8 @@ async function startMonitoring() {
     clearInterval(cdpRefreshTimer);
   if (nativeCommandTimer)
     clearInterval(nativeCommandTimer);
+  if (activePollingTimer)
+    clearInterval(activePollingTimer);
   if (!cdpHandler) {
     log("No CDP handler available");
     return;
@@ -4411,6 +4451,15 @@ async function startMonitoring() {
     }, 8e3);
     log("Native command fallback enabled");
   }
+  activePollingTimer = setInterval(async () => {
+    if (!isEnabled || !cdpHandler)
+      return;
+    try {
+      await cdpHandler.pollAndRetry();
+    } catch (e) {
+    }
+  }, 3e3);
+  log("Active polling enabled (3s interval)");
   log("Monitoring started (CDP re-scan: 2s)");
 }
 async function syncCDP() {
@@ -4442,6 +4491,10 @@ async function stopMonitoring() {
   if (nativeCommandTimer) {
     clearInterval(nativeCommandTimer);
     nativeCommandTimer = null;
+  }
+  if (activePollingTimer) {
+    clearInterval(activePollingTimer);
+    activePollingTimer = null;
   }
   if (cdpHandler) {
     await cdpHandler.stop();
@@ -5053,6 +5106,10 @@ function deactivate() {
   if (nativeCommandTimer) {
     clearInterval(nativeCommandTimer);
     nativeCommandTimer = null;
+  }
+  if (activePollingTimer) {
+    clearInterval(activePollingTimer);
+    activePollingTimer = null;
   }
   if (cdpHandler) {
     cdpHandler.stop().catch(() => {

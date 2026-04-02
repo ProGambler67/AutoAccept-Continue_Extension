@@ -440,6 +440,45 @@ class CDPHandler {
         }
         return stats;
     }
+
+    /**
+     * Active polling from the extension process (Node.js — never throttled).
+     * Calls __autoContinuePollOnce() on every connected CDP target.
+     * This is the key mechanism that makes background mode work:
+     * even if the browser tab has its timers throttled, this CDP call
+     * executes synchronously in the target's JS context.
+     */
+    async pollAndRetry() {
+        if (!this.isEnabled) return [];
+
+        const results = [];
+        for (const [id, conn] of this.connections) {
+            if (!conn || !conn.injected) continue;
+            if (conn.ws.readyState !== 1 /* WebSocket.OPEN */) continue;
+
+            try {
+                const res = await this._evaluate(id,
+                    'JSON.stringify(window.__autoContinuePollOnce ? window.__autoContinuePollOnce() : {skipped:"no-function"})');
+                if (res?.result?.value) {
+                    const r = JSON.parse(res.result.value);
+                    r.targetId = id;
+                    results.push(r);
+
+                    // Log meaningful events (not routine skips)
+                    if (r.clicked) {
+                        this.log(`[RemotePoll] Target ${id}: ✓ CLICKED retry for "${r.pattern}"`);
+                    } else if (r.errorFound && !r.buttonFound) {
+                        this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
+                    } else if (r.errorFound && r.buttonFound && r.skipped === 'dedup') {
+                        // Already handled recently, no need to log every time
+                    }
+                }
+            } catch (e) {
+                // Connection may have dropped — will be cleaned up by close handler
+            }
+        }
+        return results;
+    }
 }
 
 module.exports = { CDPHandler };

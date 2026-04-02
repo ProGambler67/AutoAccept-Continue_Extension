@@ -599,6 +599,107 @@
         };
     };
 
+    /**
+     * Remote-callable single-tick function for CDP polling.
+     * Called by the extension process via Runtime.evaluate to bypass
+     * browser tab throttling of timers/observers in background tabs.
+     * Returns a JSON-serializable result object.
+     */
+    window.__autoContinuePollOnce = function () {
+        const state = window.__autoContinueState;
+        const result = { errorFound: false, pattern: '', buttonFound: false, clicked: false, skipped: '' };
+
+        if (!state || !state.isRunning) {
+            result.skipped = 'not-running';
+            return result;
+        }
+
+        // Don't interfere with an active countdown from the foreground tick
+        if (state.countdownActive) {
+            result.skipped = 'countdown-active';
+            return result;
+        }
+
+        // Respect cooldown
+        const now = Date.now();
+        if ((now - state.lastRetryAt) < state.retryCooldownMs) {
+            result.skipped = 'cooldown';
+            return result;
+        }
+
+        // Max retries guard
+        if (state.consecutiveRetries >= state.maxRetries) {
+            const e = detectError();
+            if (!e.found) {
+                state.consecutiveRetries = 0;
+                state.pausedForMaxRetries = false;
+            }
+            result.skipped = 'max-retries';
+            return result;
+        }
+
+        // 1. Detect error
+        const error = detectError();
+        result.errorFound = error.found;
+        result.pattern = error.pattern;
+
+        if (!error.found) {
+            // Reset consecutive if enough time passed
+            if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
+                state.consecutiveRetries = 0;
+                state.lastHandledSig = '';
+                state.pausedForMaxRetries = false;
+            }
+            return result;
+        }
+
+        // 2. Find retry buttons
+        const buttons = findRetryButtons();
+        result.buttonFound = buttons.length > 0;
+
+        if (buttons.length === 0) {
+            return result;
+        }
+
+        // 3. Dedup — don't re-click the same error too quickly
+        const sig = error.pattern;
+        if (sig === state.lastHandledSig && (now - state.lastRetryAt) < state.retryCooldownMs * 2) {
+            result.skipped = 'dedup';
+            return result;
+        }
+
+        state.errorsDetected++;
+        state.lastError = error.pattern;
+
+        // 4. In background mode via remote poll: click immediately (no countdown)
+        //    The user isn't looking at this tab, so a visual countdown is pointless.
+        log(`[RemotePoll] Error "${error.pattern}" — clicking "${buttons[0].text}" immediately`);
+
+        const ok = clickBtn(buttons[0].btn, 'remote-poll');
+        result.clicked = ok;
+
+        if (ok) {
+            state.retries++;
+            state.consecutiveRetries++;
+            state.lastRetryAt = Date.now();
+            state.lastRetryAction = buttons[0].label || 'retry';
+            state.lastHandledSig = error.pattern;
+            state.retryHistory.push({
+                at: new Date().toISOString(),
+                pattern: error.pattern,
+                action: buttons[0].label || 'retry',
+                n: state.consecutiveRetries,
+                source: 'remote-poll'
+            });
+            if (state.retryHistory.length > 50) state.retryHistory = state.retryHistory.slice(-50);
+            log(`[RemotePoll] ✓ Retry #${state.consecutiveRetries} complete`);
+        } else {
+            log('[RemotePoll] ✗ Click did not succeed');
+        }
+
+        return result;
+    };
+
     window.__autoContinueStart = function (config) {
         const state = window.__autoContinueState;
         if (state.isRunning) {
