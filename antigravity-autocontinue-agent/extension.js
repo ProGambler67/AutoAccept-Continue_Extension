@@ -213,7 +213,7 @@ function loadConfiguration() {
     cdpPort = normalizeCdpPort(config.get('cdpPort', DEFAULT_CDP_PORT));
     pollInterval = Math.max(100, Math.min(5000, Number(config.get('pollInterval', 500)) || 500));
     maxRetries = Math.max(1, Math.min(500, Number(config.get('maxRetries', 50)) || 50));
-    retryCooldownMs = Math.max(500, Math.min(30000, Number(config.get('retryCooldownMs', 5000)) || 5000));
+    retryCooldownMs = Math.max(0, Math.min(30000, Number(config.get('retryCooldownMs', 5000)) || 0));
     retryDelaySeconds = Math.max(1, Math.min(30, Number(config.get('retryDelaySeconds', 5)) || 5));
     enableNativeCommands = config.get('enableNativeCommands', true) !== false;
 }
@@ -221,19 +221,18 @@ function loadConfiguration() {
 function updateStatusBar() {
     if (!statusBarItem) return;
 
-    // Get countdown state if available
-    const hasCountdown = cdpHandler && cdpHandler.getConnectionCount() > 0;
+    const connCount = cdpHandler ? cdpHandler.getConnectionCount() : 0;
 
     if (isEnabled && backgroundModeEnabled) {
-        statusBarItem.text = '$(sync~spin) AutoContinue: BG';
-        statusBarItem.tooltip = 'AutoContinue (Background Mode) — click to disable';
+        statusBarItem.text = `$(sync~spin) AC: BG [${connCount}]`;
+        statusBarItem.tooltip = `AutoContinue Background Mode — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else if (isEnabled) {
-        statusBarItem.text = '$(sync~spin) AutoContinue: ON';
-        statusBarItem.tooltip = 'AutoContinue is active — click to disable';
+        statusBarItem.text = `$(sync~spin) AC: ON [${connCount}]`;
+        statusBarItem.tooltip = `AutoContinue Active — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
-        statusBarItem.text = '$(sync) AutoContinue: OFF';
+        statusBarItem.text = '$(sync) AC: OFF';
         statusBarItem.tooltip = 'Click to enable AutoContinue error retry';
         statusBarItem.backgroundColor = undefined;
     }
@@ -434,7 +433,7 @@ function openControlPanel(context) {
                 break;
             }
             case 'saveCooldown': {
-                const val = Math.max(500, Math.min(30000, Number(msg.value) || 5000));
+                const val = Math.max(0, Math.min(30000, Number(msg.value) || 0));
                 await vscode.workspace.getConfiguration('autoContinue').update('retryCooldownMs', val, vscode.ConfigurationTarget.Global);
                 retryCooldownMs = val;
                 log(`Retry cooldown saved: ${val}ms`);
@@ -766,7 +765,7 @@ function getControlPanelHtml() {
           <input id="maxRetriesInput" type="number" min="1" max="500" step="1" />
         </label>
         <label>Cooldown (ms)
-          <input id="cooldownInput" type="number" min="500" max="30000" step="100" />
+          <input id="cooldownInput" type="number" min="0" max="30000" step="100" />
         </label>
         <label>Retry Delay (s)
           <input id="delayInput" type="number" min="1" max="30" step="1" />
@@ -917,11 +916,13 @@ function getControlPanelHtml() {
         errorCard.style.display = 'none';
       }
 
-      // Config inputs
-      byId('portInput').value = String(s.cdpPort || 9000);
-      byId('maxRetriesInput').value = String(s.maxRetries || 50);
-      byId('cooldownInput').value = String(s.retryCooldownMs || 5000);
-      byId('delayInput').value = String(s.retryDelaySeconds || 5);
+      // Config inputs — only update when the user is NOT focused on them
+      // (otherwise the 2s refresh overwrites what they're typing)
+      const activeId = document.activeElement ? document.activeElement.id : '';
+      if (activeId !== 'portInput') byId('portInput').value = String(s.cdpPort || 9000);
+      if (activeId !== 'maxRetriesInput') byId('maxRetriesInput').value = String(s.maxRetries || 50);
+      if (activeId !== 'cooldownInput') byId('cooldownInput').value = String(s.retryCooldownMs != null ? s.retryCooldownMs : 5000);
+      if (activeId !== 'delayInput') byId('delayInput').value = String(s.retryDelaySeconds || 5);
 
       // Timestamps
       if (s.lastRefreshedAt) {

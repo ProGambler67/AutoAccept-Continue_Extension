@@ -91,7 +91,7 @@
         "autoContinue.retryCooldownMs": {
           "type": "number",
           "default": 5000,
-          "minimum": 500,
+          "minimum": 0,
           "maximum": 30000,
           "description": "Minimum cooldown between retry attempts in milliseconds"
         },
