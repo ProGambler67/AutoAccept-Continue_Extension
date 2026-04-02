@@ -614,6 +614,15 @@
             return result;
         }
 
+        // If the tab is visible, the foreground tick() handles retries
+        // with the countdown UI. Only act when the tab is backgrounded/hidden.
+        try {
+            if (!document.hidden && document.visibilityState !== 'hidden') {
+                result.skipped = 'tab-visible';
+                return result;
+            }
+        } catch (e) { }
+
         // Don't interfere with an active countdown from the foreground tick
         if (state.countdownActive) {
             result.skipped = 'countdown-active';

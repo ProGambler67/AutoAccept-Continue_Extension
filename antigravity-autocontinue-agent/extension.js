@@ -135,7 +135,7 @@ async function activate(context) {
     try {
         statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
         statusBarItem.command = 'autocontinue.toggle';
-        statusBarItem.text = '$(sync) AutoContinue: OFF';
+        statusBarItem.text = '⚡ AC: OFF';
         statusBarItem.tooltip = 'Click to toggle AutoContinue error retry';
         context.subscriptions.push(statusBarItem);
         statusBarItem.show();
@@ -224,15 +224,15 @@ function updateStatusBar() {
     const connCount = cdpHandler ? cdpHandler.getConnectionCount() : 0;
 
     if (isEnabled && backgroundModeEnabled) {
-        statusBarItem.text = `$(sync~spin) AC: BG [${connCount}]`;
+        statusBarItem.text = `⚡ AC: BG [${connCount}]`;
         statusBarItem.tooltip = `AutoContinue Background Mode — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else if (isEnabled) {
-        statusBarItem.text = `$(sync~spin) AC: ON [${connCount}]`;
+        statusBarItem.text = `⚡ AC: ON [${connCount}]`;
         statusBarItem.tooltip = `AutoContinue Active — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
-        statusBarItem.text = '$(sync) AC: OFF';
+        statusBarItem.text = '⚡ AC: OFF';
         statusBarItem.tooltip = 'Click to enable AutoContinue error retry';
         statusBarItem.backgroundColor = undefined;
     }
@@ -516,276 +516,531 @@ function getControlPanelHtml() {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
     :root {
-      --bg: #0a0e14;
-      --panel: #111820;
-      --panel-2: #161e2a;
-      --txt: #e6edf3;
-      --muted: #8b99a8;
+      --bg: #0c0c0c;
+      --surface: #141414;
+      --surface-2: #1a1a1a;
+      --border: #222;
+      --border-hover: #333;
+      --txt: #e0e0e0;
+      --txt-secondary: #777;
       --accent: #00d4aa;
-      --accent2: #00b894;
-      --ok: #2ea043;
-      --warn: #d29922;
-      --bad: #f85149;
-      --glow: rgba(0, 212, 170, 0.15);
+      --accent-dim: rgba(0, 212, 170, 0.08);
+      --accent-glow: rgba(0, 212, 170, 0.12);
+      --red: #e55;
+      --red-dim: rgba(238, 85, 85, 0.08);
+      --amber: #e0a030;
+      --amber-dim: rgba(224, 160, 48, 0.08);
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      font-family: 'Inter', -apple-system, system-ui, sans-serif;
       background: var(--bg);
       color: var(--txt);
-      padding: 20px;
+      padding: 24px 20px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 14px; }
 
+    .wrap {
+      max-width: 640px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* ── Cards ── */
     .card {
-      background: linear-gradient(165deg, var(--panel), var(--panel-2));
-      border: 1px solid #1e2a3a;
-      border-radius: 14px;
-      padding: 16px;
-      transition: border-color 0.2s;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      transition: border-color 0.15s ease;
     }
-    .card:hover { border-color: #2a3a4e; }
-    .card.glow { border-color: var(--accent); box-shadow: 0 0 20px var(--glow); }
+    .card:hover { border-color: var(--border-hover); }
+    .card.active { border-color: rgba(0,212,170,0.25); }
 
+    /* ── Header ── */
     .header {
-      display: flex; align-items: center; justify-content: space-between;
-      flex-wrap: wrap; gap: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
     }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+
+    .logo {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+      background: var(--accent-dim);
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
     h1 {
-      font-size: 20px; font-weight: 700;
-      background: linear-gradient(135deg, var(--accent), #00e5bf);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--txt);
+      letter-spacing: -0.2px;
     }
-    .subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    h1 span {
+      color: var(--txt-secondary);
+      font-weight: 400;
+      font-size: 12px;
+      margin-left: 6px;
+    }
 
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
-    .stat {
-      border: 1px solid #1e2a3a; border-radius: 10px; padding: 12px;
-      background: rgba(0,0,0,0.3);
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
     }
-    .stat .k {
-      color: var(--muted); font-size: 10px; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.8px;
+    .badge.on {
+      background: var(--accent-dim);
+      color: var(--accent);
     }
-    .stat .v { margin-top: 6px; font-size: 14px; font-weight: 600; word-break: break-word; }
-    .stat .v.big { font-size: 28px; font-weight: 800; }
-    .stat .v.accent { color: var(--accent); }
-    .stat .v.warn { color: var(--warn); }
-    .stat .v.bad { color: var(--bad); }
+    .badge.off {
+      background: rgba(119,119,119,0.1);
+      color: var(--txt-secondary);
+    }
 
-    .status-badge {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 700;
-      letter-spacing: 0.5px; text-transform: uppercase;
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
     }
-    .status-badge.on { background: rgba(0,212,170,0.15); color: var(--accent); }
-    .status-badge.off { background: rgba(139,153,168,0.15); color: var(--muted); }
-
-    .dot { width: 8px; height: 8px; border-radius: 50%; }
-    .dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.5s ease-in-out infinite; }
-    .dot.off { background: var(--muted); }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
-    input[type="number"] {
-      width: 100px; padding: 8px 10px;
-      background: rgba(0,0,0,0.4); border: 1px solid #1e2a3a; border-radius: 8px;
-      color: var(--txt); font-size: 13px;
+    .dot.on {
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s ease-in-out infinite;
     }
-    input[type="number"]:focus { outline: none; border-color: var(--accent); }
+    .dot.off { background: #555; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+    /* ── Controls row ── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
     button {
-      border: 0; border-radius: 8px; padding: 10px 16px; font-size: 12px;
-      font-weight: 600; color: #fff; cursor: pointer;
-      transition: all 0.2s; letter-spacing: 0.3px;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--txt);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
     }
-    button:hover { transform: translateY(-1px); }
-    button:active { transform: translateY(0); }
-    button.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #000; }
-    button.secondary { background: #1e2a3a; }
-    button.warn { background: #8a6517; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
-    .cdp-status {
-      padding: 10px 14px; border-radius: 10px; font-size: 12px;
-      border: 1px solid #1e2a3a; background: rgba(0,0,0,0.3);
+    button:hover {
+      border-color: var(--border-hover);
+      background: #1e1e1e;
     }
-    .cdp-status.ok { color: #a7f3b6; border-color: #1f6b37; }
-    .cdp-status.bad { color: #ffb2ab; border-color: #8c2f2b; }
+    button:active { transform: scale(0.97); }
+    button.primary {
+      background: var(--accent);
+      color: #000;
+      border-color: transparent;
+      font-weight: 600;
+    }
+    button.primary:hover {
+      background: #00e5bf;
+      border-color: transparent;
+    }
+    button.danger {
+      background: rgba(238,85,85,0.12);
+      border-color: rgba(238,85,85,0.2);
+      color: var(--red);
+    }
+    button.danger:hover {
+      background: rgba(238,85,85,0.18);
+    }
+    button:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
-    /* Countdown card */
+    /* ── CDP pill ── */
+    .cdp-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 500;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--txt-secondary);
+    }
+    .cdp-pill.ok {
+      border-color: rgba(0,212,170,0.2);
+      color: var(--accent);
+    }
+    .cdp-pill.bad {
+      border-color: rgba(238,85,85,0.2);
+      color: var(--red);
+    }
+
+    /* ── Stats grid ── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .stat-item {
+      padding: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      text-align: center;
+    }
+    .stat-label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-value.accent { color: var(--accent); }
+    .stat-value.sm { font-size: 13px; font-weight: 500; }
+
+    /* ── Section labels ── */
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 10px;
+    }
+
+    /* ── Toggle row ── */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .toggle-info h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--txt);
+    }
+    .toggle-info p {
+      font-size: 11px;
+      color: var(--txt-secondary);
+      margin-top: 2px;
+    }
+
+    .toggle-btn {
+      min-width: 56px;
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 6px;
+      text-align: center;
+    }
+    .toggle-btn.is-on {
+      background: var(--accent-dim);
+      border-color: rgba(0,212,170,0.2);
+      color: var(--accent);
+    }
+
+    /* ── Config ── */
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .config-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .config-item label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .config-item input[type="number"] {
+      width: 100%;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      color: var(--txt);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: border-color 0.15s ease;
+    }
+    .config-item input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .save-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* ── Countdown card ── */
     .countdown-card {
       text-align: center;
-      border-color: var(--warn) !important;
-      box-shadow: 0 0 20px rgba(210, 153, 34, 0.15);
+      border-color: rgba(224,160,48,0.3) !important;
     }
     .countdown-number {
-      font-size: 56px;
-      font-weight: 800;
-      background: linear-gradient(135deg, var(--warn), #f0b429);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      font-size: 48px;
+      font-weight: 700;
+      color: var(--amber);
       line-height: 1;
-      animation: countdownPulse 1s ease-in-out infinite;
+      font-variant-numeric: tabular-nums;
+      animation: cdPulse 1s ease-in-out infinite;
     }
-    @keyframes countdownPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes cdPulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .countdown-bar-track {
+      margin-top: 12px;
+      height: 3px;
+      background: var(--surface-2);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .countdown-bar-fill {
+      height: 100%;
+      background: var(--amber);
+      border-radius: 2px;
+      transition: width 1s linear;
+    }
 
-    /* Retry history */
+    /* ── History ── */
     .history-list {
-      max-height: 200px; overflow-y: auto;
-      font-size: 12px;
+      max-height: 180px;
+      overflow-y: auto;
     }
     .history-item {
-      padding: 8px 10px;
-      border-bottom: 1px solid #1e2a3a;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
     }
     .history-item:last-child { border-bottom: none; }
-    .history-time { color: var(--muted); font-size: 11px; }
+    .history-time { color: var(--txt-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .history-pattern { color: var(--txt-secondary); font-size: 11px; margin-left: 6px; }
     .history-action {
-      color: var(--accent); font-weight: 600;
-      padding: 2px 8px; background: rgba(0,212,170,0.1);
-      border-radius: 4px; font-size: 11px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--accent);
+      padding: 2px 8px;
+      background: var(--accent-dim);
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      flex-shrink: 0;
     }
 
+    /* ── Error log ── */
     .error-log {
-      margin-top: 8px; padding: 10px; border-radius: 8px;
-      background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.2);
-      font-size: 12px; color: #ffb2ab; word-break: break-word;
-      max-height: 120px; overflow-y: auto;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--red-dim);
+      border: 1px solid rgba(238,85,85,0.15);
+      font-size: 12px;
+      color: #f99;
+      word-break: break-word;
+      margin-top: 8px;
+      max-height: 100px;
+      overflow-y: auto;
     }
     .error-log:empty { display: none; }
 
-    .muted { color: var(--muted); font-size: 11px; }
+    /* ── Footer ── */
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .footer-meta {
+      font-size: 11px;
+      color: var(--txt-secondary);
+    }
+    .footer-meta kbd {
+      font-family: inherit;
+      background: var(--surface-2);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10px;
+      border: 1px solid var(--border);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #444; }
   </style>
 </head>
 <body>
   <div class="wrap">
 
-    <div class="card glow" id="mainCard">
+    <!-- Header -->
+    <div class="card" id="mainCard">
       <div class="header">
-        <div>
-          <h1>⚡ AutoContinue Agent v2</h1>
-          <div class="subtitle">Automatic error detection & retry with countdown timer</div>
+        <div class="header-left">
+          <div class="logo">⚡</div>
+          <h1>AutoContinue<span>v2</span></h1>
         </div>
-        <div id="statusBadge" class="status-badge off">
+        <div id="statusBadge" class="badge off">
           <span class="dot off" id="statusDot"></span>
           <span id="statusLabel">OFF</span>
         </div>
       </div>
     </div>
 
-    <!-- COUNTDOWN CARD (only visible during active countdown) -->
+    <!-- Countdown (hidden by default) -->
     <div class="card countdown-card" id="countdownCard" style="display:none;">
-      <div style="font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">
-        ⚡ Retrying in...
-      </div>
+      <div class="section-label" style="margin-bottom:6px;">⚡ Retrying in…</div>
       <div class="countdown-number" id="countdownNumber">5</div>
-      <div style="font-size: 13px; color: var(--muted); margin-top: 8px;">
-        Error detected — clicking Retry button automatically
-      </div>
-      <div style="margin-top: 12px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-        <div id="countdownBar" style="height:100%; background: linear-gradient(90deg, var(--warn), #f0b429); border-radius: 2px; transition: width 1s linear; width: 100%;"></div>
+      <div style="font-size:12px; color:var(--txt-secondary); margin-top:6px;">Auto-clicking retry button</div>
+      <div class="countdown-bar-track">
+        <div class="countdown-bar-fill" id="countdownBar" style="width:100%;"></div>
       </div>
     </div>
 
+    <!-- Main controls -->
     <div class="card">
-      <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
-        <button class="primary" id="toggleBtn">Enable AutoContinue</button>
-        <button class="secondary" id="refreshBtn">Refresh</button>
+      <div class="controls">
+        <button class="primary" id="toggleBtn" style="flex:1;">Enable AutoContinue</button>
+        <button id="refreshBtn">↻</button>
       </div>
-      <div id="cdpStatus" class="cdp-status">Checking CDP...</div>
+      <div id="cdpStatus" class="cdp-pill" style="margin-top:10px;">Checking CDP…</div>
     </div>
 
-    <div class="card" id="bgCard" style="border-color: #1e2a3a;">
-      <div class="row" style="justify-content: space-between; align-items: center;">
-        <div>
-          <div style="font-size: 14px; font-weight: 700;">🌑 Background Mode</div>
-          <div class="muted" style="margin-top: 4px;">Dark overlay with live countdown while the agent works silently</div>
+    <!-- Background mode -->
+    <div class="card" id="bgCard">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <h3>Background Mode</h3>
+          <p>Overlay + silent retry when tab is not visible</p>
         </div>
-        <button id="toggleBgBtn" class="secondary" style="min-width: 130px; padding: 10px 20px; font-size: 13px; font-weight: 700;">OFF</button>
+        <button id="toggleBgBtn" class="toggle-btn">OFF</button>
       </div>
-      <div class="muted" style="margin-top: 8px;">Shortcut: <kbd style="background:#1e2a3a; padding:2px 6px; border-radius:4px;">Ctrl+Shift+B</kbd></div>
     </div>
 
+    <!-- Stats -->
     <div class="card">
-      <div class="grid">
-        <div class="stat">
-          <div class="k">Total Retries</div>
-          <div class="v big accent" id="totalRetries">0</div>
+      <div class="section-label">Statistics</div>
+      <div class="stats">
+        <div class="stat-item">
+          <div class="stat-label">Retries</div>
+          <div class="stat-value accent" id="totalRetries">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Errors Detected</div>
-          <div class="v big" id="errorsDetected">0</div>
+        <div class="stat-item">
+          <div class="stat-label">Errors</div>
+          <div class="stat-value" id="errorsDetected">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Consecutive</div>
-          <div class="v" id="consecutiveRetries">0</div>
+        <div class="stat-item">
+          <div class="stat-label">Consecutive</div>
+          <div class="stat-value" id="consecutiveRetries">0</div>
         </div>
-        <div class="stat">
-          <div class="k">CDP Connections</div>
-          <div class="v" id="connections">0</div>
+      </div>
+      <div class="stats" style="margin-top:8px;">
+        <div class="stat-item">
+          <div class="stat-label">CDP</div>
+          <div class="stat-value sm" id="connections">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Last Retry</div>
-          <div class="v" id="lastRetry">-</div>
+        <div class="stat-item">
+          <div class="stat-label">Last Retry</div>
+          <div class="stat-value sm" id="lastRetry">—</div>
         </div>
-        <div class="stat">
-          <div class="k">Platform</div>
-          <div class="v" id="platform" style="font-size:11px;">-</div>
+        <div class="stat-item">
+          <div class="stat-label">Platform</div>
+          <div class="stat-value sm" id="platform">—</div>
         </div>
       </div>
     </div>
 
-    <!-- Retry History -->
+    <!-- Retry History (hidden by default) -->
     <div class="card" id="historyCard" style="display:none;">
-      <div class="k" style="margin-bottom: 10px;">Recent Retries</div>
+      <div class="section-label">Recent Retries</div>
       <div class="history-list" id="historyList"></div>
     </div>
 
+    <!-- Last Error (hidden by default) -->
     <div class="card" id="errorCard" style="display:none;">
-      <div class="stat" style="border:0; padding:0; background:transparent;">
-        <div class="k">Last Error Detected</div>
-        <div class="error-log" id="lastError"></div>
-      </div>
+      <div class="section-label">Last Error</div>
+      <div class="error-log" id="lastError"></div>
     </div>
 
+    <!-- Configuration -->
     <div class="card">
-      <div class="k" style="margin-bottom: 10px;">Configuration</div>
-      <div class="row" style="gap: 14px; flex-wrap: wrap;">
-        <label>CDP Port
+      <div class="section-label">Configuration</div>
+      <div class="config-grid">
+        <div class="config-item">
+          <label>CDP Port</label>
           <input id="portInput" type="number" min="1" max="65535" step="1" />
-        </label>
-        <label>Max Retries
+        </div>
+        <div class="config-item">
+          <label>Max Retries</label>
           <input id="maxRetriesInput" type="number" min="1" max="500" step="1" />
-        </label>
-        <label>Cooldown (ms)
+        </div>
+        <div class="config-item">
+          <label>Cooldown (ms)</label>
           <input id="cooldownInput" type="number" min="0" max="30000" step="100" />
-        </label>
-        <label>Retry Delay (s)
+        </div>
+        <div class="config-item">
+          <label>Retry Delay (s)</label>
           <input id="delayInput" type="number" min="1" max="30" step="1" />
-        </label>
+        </div>
       </div>
-      <div class="row" style="margin-top: 10px; flex-wrap: wrap;">
-        <button class="secondary" id="savePort">Save Port</button>
-        <button class="secondary" id="saveMaxRetries">Save Max Retries</button>
-        <button class="secondary" id="saveCooldown">Save Cooldown</button>
-        <button class="secondary" id="saveDelay">Save Delay</button>
+      <div class="save-row">
+        <button id="savePort">Save Port</button>
+        <button id="saveMaxRetries">Save Retries</button>
+        <button id="saveCooldown">Save Cooldown</button>
+        <button id="saveDelay">Save Delay</button>
       </div>
     </div>
 
+    <!-- Footer -->
     <div class="card">
-      <div class="row">
-        <button class="secondary" id="copyDiagnostics">Copy Diagnostics</button>
-        <button class="secondary" id="openOutputLog">Open Output Log</button>
+      <div class="footer">
+        <div class="controls">
+          <button id="copyDiagnostics">Copy Diagnostics</button>
+          <button id="openOutputLog">Output Log</button>
+        </div>
+        <div class="footer-meta">
+          <kbd>⌘⇧K</kbd> toggle · IDE: <span id="ide">—</span>
+        </div>
       </div>
-      <div class="muted" style="margin-top: 10px;">Last refresh: <span id="lastRefreshed">-</span></div>
-      <div class="muted">Shortcut: <kbd>Ctrl+Shift+K</kbd> (toggle) | IDE: <span id="ide">-</span></div>
+      <div class="footer-meta" style="margin-top:8px;">Last refresh: <span id="lastRefreshed">—</span></div>
     </div>
 
   </div>
@@ -796,7 +1051,6 @@ function getControlPanelHtml() {
     function post(type, payload = {}) { vscode.postMessage({ type, ...payload }); }
 
     function render(s) {
-      // Status badge
       const badge = byId('statusBadge');
       const dot = byId('statusDot');
       const label = byId('statusLabel');
@@ -804,56 +1058,52 @@ function getControlPanelHtml() {
       const toggleBtn = byId('toggleBtn');
 
       if (s.isEnabled && s.backgroundModeEnabled) {
-        badge.className = 'status-badge on';
+        badge.className = 'badge on';
         dot.className = 'dot on';
         label.textContent = 'BG MODE';
-        mainCard.classList.add('glow');
-        toggleBtn.textContent = 'Disable AutoContinue';
-        toggleBtn.className = 'button warn';
-        toggleBtn.style.background = '#8a6517';
+        mainCard.classList.add('active');
+        toggleBtn.textContent = 'Disable';
+        toggleBtn.className = 'danger';
+        toggleBtn.style.cssText = 'flex:1;';
       } else if (s.isEnabled) {
-        badge.className = 'status-badge on';
+        badge.className = 'badge on';
         dot.className = 'dot on';
         label.textContent = 'ACTIVE';
-        mainCard.classList.add('glow');
-        toggleBtn.textContent = 'Disable AutoContinue';
-        toggleBtn.className = 'button warn';
-        toggleBtn.style.background = '#8a6517';
+        mainCard.classList.add('active');
+        toggleBtn.textContent = 'Disable';
+        toggleBtn.className = 'danger';
+        toggleBtn.style.cssText = 'flex:1;';
       } else {
-        badge.className = 'status-badge off';
+        badge.className = 'badge off';
         dot.className = 'dot off';
         label.textContent = 'OFF';
-        mainCard.classList.remove('glow');
+        mainCard.classList.remove('active');
         toggleBtn.textContent = 'Enable AutoContinue';
-        toggleBtn.className = 'button primary';
-        toggleBtn.style.background = '';
+        toggleBtn.className = 'primary';
+        toggleBtn.style.cssText = 'flex:1;';
       }
 
       const bgBtn = byId('toggleBgBtn');
       const bgCard = byId('bgCard');
 
       if (s.backgroundModeEnabled) {
-        bgBtn.textContent = '✓ ON';
-        bgBtn.style.background = 'linear-gradient(135deg, #1f6b37, #2ea043)';
-        bgBtn.style.color = '#fff';
-        bgCard.style.borderColor = '#2ea043';
-        bgCard.style.boxShadow = '0 0 15px rgba(46, 160, 67, 0.15)';
+        bgBtn.textContent = 'ON';
+        bgBtn.className = 'toggle-btn is-on';
+        bgCard.style.borderColor = 'rgba(0,212,170,0.2)';
       } else {
         bgBtn.textContent = 'OFF';
-        bgBtn.style.background = '';
-        bgBtn.style.color = '';
-        bgCard.style.borderColor = '#1e2a3a';
-        bgCard.style.boxShadow = '';
+        bgBtn.className = 'toggle-btn';
+        bgCard.style.borderColor = '';
       }
 
       // CDP status
       const cdpEl = byId('cdpStatus');
       if (s.cdpReady) {
-        cdpEl.textContent = 'CDP connected on port ' + s.cdpPort + ' (' + s.connectionCount + ' target' + (s.connectionCount !== 1 ? 's' : '') + ')';
-        cdpEl.className = 'cdp-status ok';
+        cdpEl.textContent = 'Port ' + s.cdpPort + ' · ' + s.connectionCount + ' target' + (s.connectionCount !== 1 ? 's' : '') + ' connected';
+        cdpEl.className = 'cdp-pill ok';
       } else {
-        cdpEl.textContent = 'CDP not available on port ' + s.cdpPort + '. Launch IDE with --remote-debugging-port=' + s.cdpPort;
-        cdpEl.className = 'cdp-status bad';
+        cdpEl.textContent = 'CDP unavailable · port ' + s.cdpPort;
+        cdpEl.className = 'cdp-pill bad';
       }
 
       // Countdown card
@@ -874,18 +1124,17 @@ function getControlPanelHtml() {
       byId('errorsDetected').textContent = String(stats.errorsDetected || 0);
       byId('consecutiveRetries').textContent = String(stats.consecutiveRetries || 0);
       byId('connections').textContent = String(s.connectionCount || 0);
-      byId('ide').textContent = s.ide || '-';
-      byId('platform').textContent = s.platform || '-';
+      byId('ide').textContent = s.ide || '—';
+      byId('platform').textContent = s.platform || '—';
 
       if (stats.lastRetryAt) {
         try {
-          const d = new Date(stats.lastRetryAt);
-          byId('lastRetry').textContent = d.toLocaleTimeString();
+          byId('lastRetry').textContent = new Date(stats.lastRetryAt).toLocaleTimeString();
         } catch (e) {
           byId('lastRetry').textContent = stats.lastRetryAt;
         }
       } else {
-        byId('lastRetry').textContent = '-';
+        byId('lastRetry').textContent = '—';
       }
 
       // Retry history
@@ -895,10 +1144,11 @@ function getControlPanelHtml() {
       if (history.length > 0) {
         historyCard.style.display = '';
         historyList.innerHTML = history.slice().reverse().map(h => {
-          let timeStr = '-';
+          let timeStr = '—';
           try { timeStr = new Date(h.at).toLocaleTimeString(); } catch(e) {}
           return '<div class="history-item">' +
-            '<div><span class="history-time">' + timeStr + '</span> &mdash; ' + (h.pattern || '-').slice(0, 50) + '</div>' +
+            '<div><span class="history-time">' + timeStr + '</span>' +
+            '<span class="history-pattern"> · ' + (h.pattern || '—').slice(0, 40) + '</span></div>' +
             '<span class="history-action">' + (h.action || 'retry') + '</span>' +
           '</div>';
         }).join('');
@@ -916,8 +1166,7 @@ function getControlPanelHtml() {
         errorCard.style.display = 'none';
       }
 
-      // Config inputs — only update when the user is NOT focused on them
-      // (otherwise the 2s refresh overwrites what they're typing)
+      // Config inputs — only update when user is NOT focused
       const activeId = document.activeElement ? document.activeElement.id : '';
       if (activeId !== 'portInput') byId('portInput').value = String(s.cdpPort || 9000);
       if (activeId !== 'maxRetriesInput') byId('maxRetriesInput').value = String(s.maxRetries || 50);

@@ -4297,7 +4297,7 @@ async function activate(context) {
   try {
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
     statusBarItem.command = "autocontinue.toggle";
-    statusBarItem.text = "$(sync) AutoContinue: OFF";
+    statusBarItem.text = "\u26A1 AC: OFF";
     statusBarItem.tooltip = "Click to toggle AutoContinue error retry";
     context.subscriptions.push(statusBarItem);
     statusBarItem.show();
@@ -4367,19 +4367,19 @@ function updateStatusBar() {
     return;
   const connCount = cdpHandler ? cdpHandler.getConnectionCount() : 0;
   if (isEnabled && backgroundModeEnabled) {
-    statusBarItem.text = `$(sync~spin) AC: BG [${connCount}]`;
+    statusBarItem.text = `\u26A1 AC: BG [${connCount}]`;
     statusBarItem.tooltip = `AutoContinue Background Mode \u2014 ${connCount} target(s) connected
 Cooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s
 Click to disable`;
     statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
   } else if (isEnabled) {
-    statusBarItem.text = `$(sync~spin) AC: ON [${connCount}]`;
+    statusBarItem.text = `\u26A1 AC: ON [${connCount}]`;
     statusBarItem.tooltip = `AutoContinue Active \u2014 ${connCount} target(s) connected
 Cooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s
 Click to disable`;
     statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
   } else {
-    statusBarItem.text = "$(sync) AC: OFF";
+    statusBarItem.text = "\u26A1 AC: OFF";
     statusBarItem.tooltip = "Click to enable AutoContinue error retry";
     statusBarItem.backgroundColor = void 0;
   }
