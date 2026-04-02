@@ -6,3 +6,4 @@ state/
 .git/
 .gitignore
 .eslintrc*
+noneed/
