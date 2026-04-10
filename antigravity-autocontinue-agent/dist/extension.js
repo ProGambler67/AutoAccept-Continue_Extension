@@ -3,6 +3,110 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
+// main_scripts/recovery-core.js
+var require_recovery_core = __commonJS({
+  "main_scripts/recovery-core.js"(exports2, module2) {
+    (function(root, factory) {
+      const api = factory();
+      if (typeof module2 !== "undefined" && module2.exports) {
+        module2.exports = api;
+      }
+      if (root) {
+        root.AutoContinueRecoveryCore = api;
+      }
+    })(typeof globalThis !== "undefined" ? globalThis : exports2, function() {
+      const DEFAULT_PROCESSING_DELAY_SECONDS = 5;
+      const FOREGROUND_SCAN_INTERVAL_MS = 250;
+      const REMOTE_POLL_INTERVAL_MS = 1e3;
+      const CDP_RESCAN_INTERVAL_MS = 1500;
+      const CONTROL_PANEL_REFRESH_INTERVAL_MS = 2e3;
+      const BUSY_PATTERNS = [
+        "agent hasn't processed previous input",
+        "agent hasnt processed previous input",
+        "agent has not processed previous input",
+        "previous input is still being processed",
+        "previous input is still processing",
+        "still processing previous input",
+        "wait for the previous input to finish",
+        "please wait for the current input to finish"
+      ];
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+      function normalizeProcessingDelaySeconds2(value, fallback = DEFAULT_PROCESSING_DELAY_SECONDS) {
+        const numericFallback = Number.isFinite(Number(fallback)) ? Math.trunc(Number(fallback)) : DEFAULT_PROCESSING_DELAY_SECONDS;
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+          return clamp(numericFallback, 1, 30);
+        }
+        return clamp(Math.trunc(parsed), 1, 30);
+      }
+      function buildRuntimeConfig2(value) {
+        const processingDelaySeconds2 = normalizeProcessingDelaySeconds2(value, DEFAULT_PROCESSING_DELAY_SECONDS);
+        return {
+          processingDelaySeconds: processingDelaySeconds2,
+          retryDelaySeconds: processingDelaySeconds2,
+          retryCooldownMs: processingDelaySeconds2 * 1e3,
+          pollIntervalMs: FOREGROUND_SCAN_INTERVAL_MS,
+          remotePollIntervalMs: REMOTE_POLL_INTERVAL_MS,
+          cdpRescanIntervalMs: CDP_RESCAN_INTERVAL_MS,
+          controlPanelRefreshIntervalMs: CONTROL_PANEL_REFRESH_INTERVAL_MS
+        };
+      }
+      function normalizeText(text) {
+        return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+      }
+      function detectBusyPattern(text) {
+        const normalized = normalizeText(text);
+        for (const pattern of BUSY_PATTERNS) {
+          if (normalized.includes(pattern)) {
+            return pattern;
+          }
+        }
+        return "";
+      }
+      function shouldUseRemotePoll({ isBackgroundMode, documentHidden, visibilityState }) {
+        if (isBackgroundMode)
+          return true;
+        if (documentHidden)
+          return true;
+        return visibilityState === "hidden";
+      }
+      function shouldAttemptNativeContinue2({
+        nativeContinueRequested,
+        hasRetryButton,
+        hasBusySignal,
+        isAgentRunning,
+        now,
+        lastNativeAttemptTs,
+        retryCooldownMs: retryCooldownMs2
+      }) {
+        if (!nativeContinueRequested)
+          return false;
+        if (hasRetryButton)
+          return false;
+        if (hasBusySignal)
+          return false;
+        if (isAgentRunning)
+          return false;
+        const attemptNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+        const lastAttempt = Number.isFinite(Number(lastNativeAttemptTs)) ? Number(lastNativeAttemptTs) : 0;
+        const cooldown = Math.max(1e3, Number(retryCooldownMs2) || 0);
+        return attemptNow - lastAttempt >= cooldown;
+      }
+      return {
+        BUSY_PATTERNS,
+        DEFAULT_PROCESSING_DELAY_SECONDS,
+        buildRuntimeConfig: buildRuntimeConfig2,
+        detectBusyPattern,
+        normalizeProcessingDelaySeconds: normalizeProcessingDelaySeconds2,
+        shouldAttemptNativeContinue: shouldAttemptNativeContinue2,
+        shouldUseRemotePoll
+      };
+    });
+  }
+});
+
 // node_modules/ws/lib/constants.js
 var require_constants = __commonJS({
   "node_modules/ws/lib/constants.js"(exports2, module2) {
@@ -3766,29 +3870,44 @@ var require_cdp_handler = __commonJS({
       return range;
     }
     var _autoContinueScript = null;
-    var _autoContinueScriptMtime = 0;
+    var _autoContinueScriptCacheKey = "";
+    function findExistingScript(candidates, label) {
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
+      }
+      throw new Error(`${label} not found. __dirname=${__dirname}`);
+    }
     function getAutoContinueScript() {
-      const candidates = [
+      const recoveryCorePath = findExistingScript([
+        path.join(__dirname, "recovery-core.js"),
+        path.join(__dirname, "main_scripts", "recovery-core.js"),
+        path.join(__dirname, "..", "main_scripts", "recovery-core.js")
+      ], "recovery-core.js");
+      const autoContinuePath = findExistingScript([
         path.join(__dirname, "auto-continue.js"),
         path.join(__dirname, "main_scripts", "auto-continue.js"),
         path.join(__dirname, "..", "main_scripts", "auto-continue.js")
-      ];
-      for (const scriptPath of candidates) {
-        if (fs.existsSync(scriptPath)) {
-          try {
-            const stat = fs.statSync(scriptPath);
-            const mtime = stat.mtimeMs || 0;
-            if (_autoContinueScript && mtime === _autoContinueScriptMtime) {
-              return _autoContinueScript;
-            }
-            _autoContinueScript = fs.readFileSync(scriptPath, "utf8");
-            _autoContinueScriptMtime = mtime;
-            return _autoContinueScript;
-          } catch (e) {
-          }
-        }
+      ], "auto-continue.js");
+      const recoveryCoreStat = fs.statSync(recoveryCorePath);
+      const autoContinueStat = fs.statSync(autoContinuePath);
+      const cacheKey = [
+        recoveryCorePath,
+        recoveryCoreStat.mtimeMs || 0,
+        autoContinuePath,
+        autoContinueStat.mtimeMs || 0
+      ].join(":");
+      if (_autoContinueScript && cacheKey === _autoContinueScriptCacheKey) {
+        return _autoContinueScript;
       }
-      throw new Error(`auto-continue.js not found. __dirname=${__dirname}`);
+      const recoveryCoreScript = fs.readFileSync(recoveryCorePath, "utf8");
+      const autoContinueScript = fs.readFileSync(autoContinuePath, "utf8");
+      _autoContinueScript = `${recoveryCoreScript}
+;
+${autoContinueScript}`;
+      _autoContinueScriptCacheKey = cacheKey;
+      return _autoContinueScript;
     }
     var CDPHandler = class {
       constructor(logger = console.log) {
@@ -3863,6 +3982,7 @@ var require_cdp_handler = __commonJS({
         const configHash = JSON.stringify({
           p: this.basePort,
           r: this.portRange,
+          pd: config?.processingDelaySeconds || 5,
           mr: config?.maxRetries || 50,
           cd: config?.retryCooldownMs || 5e3,
           ds: config?.retryDelaySeconds || 5
@@ -4049,16 +4169,19 @@ var require_cdp_handler = __commonJS({
           } catch (e) {
             isRunning = false;
           }
+          const configJson = JSON.stringify({
+            processingDelaySeconds: config.processingDelaySeconds || config.retryDelaySeconds || 5,
+            maxRetries: config.maxRetries || 50,
+            retryCooldownMs: config.retryCooldownMs || 5e3,
+            retryDelaySeconds: config.retryDelaySeconds || 5,
+            pollInterval: config.pollInterval || 500,
+            isBackgroundMode: !!config.isBackgroundMode
+          });
           if (!isRunning) {
-            const configJson = JSON.stringify({
-              maxRetries: config.maxRetries || 50,
-              retryCooldownMs: config.retryCooldownMs || 5e3,
-              retryDelaySeconds: config.retryDelaySeconds || 5,
-              pollInterval: config.pollInterval || 500,
-              isBackgroundMode: !!config.isBackgroundMode
-            });
             this.log(`Calling __autoContinueStart in ${id}`);
             await this._safeEvaluate(id, `if(window.__autoContinueStart) window.__autoContinueStart(${configJson})`, 1);
+          } else {
+            await this._safeEvaluate(id, `if(window.__autoContinueUpdateConfig) window.__autoContinueUpdateConfig(${configJson})`, 1);
           }
         } catch (e) {
           this.log(`Failed to inject into ${id}: ${e.message}`);
@@ -4120,10 +4243,14 @@ var require_cdp_handler = __commonJS({
           retries: 0,
           errorsDetected: 0,
           lastError: "",
+          lastBusyPattern: "",
           lastRetryAt: "",
           consecutiveRetries: 0,
           countdownActive: false,
           countdownSecondsLeft: 0,
+          waitingForPreviousInput: false,
+          busyAcks: 0,
+          nativeContinueRequested: false,
           retryHistory: []
         };
         for (const [id] of this.connections) {
@@ -4140,8 +4267,18 @@ var require_cdp_handler = __commonJS({
               if (s.lastError) {
                 stats.lastError = s.lastError;
               }
+              if (s.lastBusyPattern) {
+                stats.lastBusyPattern = s.lastBusyPattern;
+              }
               if (s.lastRetryAt) {
                 stats.lastRetryAt = s.lastRetryAt;
+              }
+              if (s.waitingForPreviousInput) {
+                stats.waitingForPreviousInput = true;
+              }
+              stats.busyAcks += s.busyAcks || 0;
+              if (s.nativeContinueRequested) {
+                stats.nativeContinueRequested = true;
               }
               if (Array.isArray(s.retryHistory) && s.retryHistory.length > 0) {
                 stats.retryHistory = s.retryHistory;
@@ -4179,7 +4316,10 @@ var require_cdp_handler = __commonJS({
               results.push(r);
               if (r.clicked) {
                 this.log(`[RemotePoll] Target ${id}: \u2713 CLICKED retry for "${r.pattern}"`);
-              } else if (r.errorFound && !r.buttonFound) {
+              } else if (r.requestNativeContinue) {
+                this.log(`[RemotePoll] Target ${id}: requesting native continue for "${r.pattern}"`);
+              } else if (r.busyPattern) {
+              } else if (r.errorFound && !r.buttonFound && r.skipped !== "arming") {
                 this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
               } else if (r.errorFound && r.buttonFound && r.skipped === "dedup") {
               }
@@ -4198,6 +4338,11 @@ var require_cdp_handler = __commonJS({
 var vscode = require("vscode");
 var http = require("http");
 var os = require("os");
+var {
+  buildRuntimeConfig,
+  normalizeProcessingDelaySeconds,
+  shouldAttemptNativeContinue
+} = require_recovery_core();
 var isEnabled = false;
 var backgroundModeEnabled = false;
 var pollTimer;
@@ -4209,14 +4354,17 @@ var globalContext;
 var cdpHandler;
 var controlPanel = null;
 var cdpPort = 9e3;
-var pollInterval = 500;
+var processingDelaySeconds = 5;
+var pollInterval = 250;
+var remotePollIntervalMs = 1e3;
+var cdpRescanIntervalMs = 1500;
+var controlPanelRefreshIntervalMs = 2e3;
 var maxRetries = 50;
 var retryCooldownMs = 5e3;
 var retryDelaySeconds = 5;
 var enableNativeCommands = true;
 var lastControlPanelStatePushTs = 0;
 var cdpRefreshTimer;
-var nativeCommandTimer;
 var activePollingTimer;
 var lastNativeCommandAttemptTs = 0;
 var ENABLED_STATE_KEY = "autocontinue-enabled";
@@ -4275,21 +4423,36 @@ function normalizeCdpPort(value, fallback = DEFAULT_CDP_PORT) {
     return fallback;
   return port;
 }
-async function tryNativeContinueCommands() {
+async function tryNativeContinueCommands(request = {}) {
   if (!enableNativeCommands)
-    return;
+    return false;
   if ((currentIDE || "").toLowerCase() !== "antigravity")
-    return;
+    return false;
   const now = Date.now();
-  if (now - lastNativeCommandAttemptTs < 6e3)
-    return;
+  const canAttempt = shouldAttemptNativeContinue({
+    nativeContinueRequested: true,
+    hasRetryButton: !!request.hasRetryButton,
+    hasBusySignal: !!request.hasBusySignal,
+    isAgentRunning: !!request.isAgentRunning,
+    now,
+    lastNativeAttemptTs: lastNativeCommandAttemptTs,
+    retryCooldownMs
+  });
+  if (!canAttempt)
+    return false;
   lastNativeCommandAttemptTs = now;
+  let attempted = false;
   for (const cmd of ANTIGRAVITY_CONTINUE_COMMANDS) {
     try {
       await vscode.commands.executeCommand(cmd);
+      attempted = true;
     } catch (e) {
     }
   }
+  if (attempted) {
+    log(`Native continue fallback executed${request.pattern ? ` for "${request.pattern}"` : ""}`);
+  }
+  return attempted;
 }
 async function activate(context) {
   globalContext = context;
@@ -4315,10 +4478,13 @@ async function activate(context) {
     backgroundModeEnabled = context.globalState.get(BACKGROUND_STATE_KEY, false);
     currentIDE = detectIDE();
     loadConfiguration();
-    vscode.workspace.onDidChangeConfiguration((e) => {
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (e.affectsConfiguration("autoContinue")) {
         loadConfiguration();
         log("Configuration reloaded");
+        if (isEnabled) {
+          await startMonitoring();
+        }
       }
     });
     outputChannel = vscode.window.createOutputChannel("AutoContinue Agent");
@@ -4355,11 +4521,25 @@ async function activate(context) {
 }
 function loadConfiguration() {
   const config = vscode.workspace.getConfiguration("autoContinue");
+  const configuredProcessingDelay = config.get("processingDelaySeconds");
+  const legacyDelaySeconds = Math.max(1, Math.min(30, Number(config.get("retryDelaySeconds", 5)) || 5));
+  const legacyCooldownMs = Math.max(0, Math.min(3e4, Number(config.get("retryCooldownMs", legacyDelaySeconds * 1e3)) || 0));
+  const fallbackProcessingDelay = Math.max(legacyDelaySeconds, Math.round(legacyCooldownMs / 1e3) || 0, 1);
+  const runtimeConfig = buildRuntimeConfig(
+    normalizeProcessingDelaySeconds(
+      configuredProcessingDelay == null ? fallbackProcessingDelay : configuredProcessingDelay,
+      fallbackProcessingDelay
+    )
+  );
   cdpPort = normalizeCdpPort(config.get("cdpPort", DEFAULT_CDP_PORT));
-  pollInterval = Math.max(100, Math.min(5e3, Number(config.get("pollInterval", 500)) || 500));
+  processingDelaySeconds = runtimeConfig.processingDelaySeconds;
+  pollInterval = runtimeConfig.pollIntervalMs;
+  remotePollIntervalMs = runtimeConfig.remotePollIntervalMs;
+  cdpRescanIntervalMs = runtimeConfig.cdpRescanIntervalMs;
+  controlPanelRefreshIntervalMs = runtimeConfig.controlPanelRefreshIntervalMs;
   maxRetries = Math.max(1, Math.min(500, Number(config.get("maxRetries", 50)) || 50));
-  retryCooldownMs = Math.max(0, Math.min(3e4, Number(config.get("retryCooldownMs", 5e3)) || 0));
-  retryDelaySeconds = Math.max(1, Math.min(30, Number(config.get("retryDelaySeconds", 5)) || 5));
+  retryCooldownMs = runtimeConfig.retryCooldownMs;
+  retryDelaySeconds = runtimeConfig.retryDelaySeconds;
   enableNativeCommands = config.get("enableNativeCommands", true) !== false;
 }
 function updateStatusBar() {
@@ -4369,13 +4549,13 @@ function updateStatusBar() {
   if (isEnabled && backgroundModeEnabled) {
     statusBarItem.text = `\u26A1 AC: BG [${connCount}]`;
     statusBarItem.tooltip = `AutoContinue Background Mode \u2014 ${connCount} target(s) connected
-Cooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s
+Processing wait: ${processingDelaySeconds}s
 Click to disable`;
     statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
   } else if (isEnabled) {
     statusBarItem.text = `\u26A1 AC: ON [${connCount}]`;
     statusBarItem.tooltip = `AutoContinue Active \u2014 ${connCount} target(s) connected
-Cooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s
+Processing wait: ${processingDelaySeconds}s
 Click to disable`;
     statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
   } else {
@@ -4391,7 +4571,7 @@ async function handleToggle(context) {
   if (isEnabled) {
     log("AutoContinue: ENABLED");
     await startMonitoring();
-    vscode.window.showInformationMessage(`AutoContinue: Enabled \u2014 will auto-retry errors with ${retryDelaySeconds}s countdown`);
+    vscode.window.showInformationMessage(`AutoContinue: Enabled \u2014 will auto-retry with a ${processingDelaySeconds}s processing wait`);
   } else {
     log("AutoContinue: DISABLED");
     await stopMonitoring();
@@ -4423,8 +4603,6 @@ async function startMonitoring() {
     clearInterval(pollTimer);
   if (cdpRefreshTimer)
     clearInterval(cdpRefreshTimer);
-  if (nativeCommandTimer)
-    clearInterval(nativeCommandTimer);
   if (activePollingTimer)
     clearInterval(activePollingTimer);
   if (!cdpHandler) {
@@ -4440,31 +4618,32 @@ async function startMonitoring() {
     if (!isEnabled)
       return;
     await syncCDP();
-  }, 2e3);
+  }, cdpRescanIntervalMs);
   pollTimer = setInterval(async () => {
     if (!isEnabled)
       return;
     updateStatusBar();
     pushControlPanelState();
-  }, 3e3);
-  if (enableNativeCommands && (currentIDE || "").toLowerCase() === "antigravity") {
-    nativeCommandTimer = setInterval(() => {
-      if (!isEnabled)
-        return;
-      tryNativeContinueCommands();
-    }, 8e3);
-    log("Native command fallback enabled");
-  }
+  }, controlPanelRefreshIntervalMs);
   activePollingTimer = setInterval(async () => {
     if (!isEnabled || !cdpHandler)
       return;
     try {
-      await cdpHandler.pollAndRetry();
+      const results = await cdpHandler.pollAndRetry();
+      const nativeRequest = Array.isArray(results) ? results.find((result) => result && result.requestNativeContinue) : null;
+      if (nativeRequest) {
+        await tryNativeContinueCommands({
+          hasRetryButton: !!nativeRequest.buttonFound,
+          hasBusySignal: !!nativeRequest.busyPattern,
+          isAgentRunning: !!nativeRequest.isAgentRunning,
+          pattern: nativeRequest.pattern || nativeRequest.busyPattern || ""
+        });
+      }
     } catch (e) {
     }
-  }, 3e3);
-  log("Active polling enabled (3s interval)");
-  log("Monitoring started (CDP re-scan: 2s)");
+  }, remotePollIntervalMs);
+  log(`Active polling enabled (${remotePollIntervalMs}ms interval)`);
+  log(`Monitoring started (CDP re-scan: ${cdpRescanIntervalMs}ms)`);
 }
 async function syncCDP() {
   if (!cdpHandler || !isEnabled)
@@ -4472,6 +4651,7 @@ async function syncCDP() {
   try {
     await cdpHandler.start({
       cdpPort,
+      processingDelaySeconds,
       maxRetries,
       retryCooldownMs,
       retryDelaySeconds,
@@ -4491,10 +4671,6 @@ async function stopMonitoring() {
   if (cdpRefreshTimer) {
     clearInterval(cdpRefreshTimer);
     cdpRefreshTimer = null;
-  }
-  if (nativeCommandTimer) {
-    clearInterval(nativeCommandTimer);
-    nativeCommandTimer = null;
   }
   if (activePollingTimer) {
     clearInterval(activePollingTimer);
@@ -4545,19 +4721,14 @@ function openControlPanel(context) {
         await pushControlPanelState();
         break;
       }
-      case "saveCooldown": {
-        const val = Math.max(0, Math.min(3e4, Number(msg.value) || 0));
-        await vscode.workspace.getConfiguration("autoContinue").update("retryCooldownMs", val, vscode.ConfigurationTarget.Global);
-        retryCooldownMs = val;
-        log(`Retry cooldown saved: ${val}ms`);
-        await pushControlPanelState();
-        break;
-      }
-      case "saveDelay": {
-        const val = Math.max(1, Math.min(30, Number(msg.value) || 5));
-        await vscode.workspace.getConfiguration("autoContinue").update("retryDelaySeconds", val, vscode.ConfigurationTarget.Global);
-        retryDelaySeconds = val;
-        log(`Retry delay saved: ${val}s`);
+      case "saveProcessingDelay": {
+        const val = normalizeProcessingDelaySeconds(msg.value, processingDelaySeconds);
+        await vscode.workspace.getConfiguration("autoContinue").update("processingDelaySeconds", val, vscode.ConfigurationTarget.Global);
+        loadConfiguration();
+        if (isEnabled) {
+          await syncCDP();
+        }
+        log(`Processing delay saved: ${val}s`);
         await pushControlPanelState();
         break;
       }
@@ -4597,6 +4768,7 @@ async function pushControlPanelState() {
         cdpReady,
         connectionCount,
         pollInterval,
+        processingDelaySeconds,
         maxRetries,
         retryCooldownMs,
         retryDelaySeconds,
@@ -4606,9 +4778,13 @@ async function pushControlPanelState() {
           errorsDetected: stats.errorsDetected || 0,
           consecutiveRetries: stats.consecutiveRetries || 0,
           lastError: stats.lastError || "",
+          lastBusyPattern: stats.lastBusyPattern || "",
           lastRetryAt: stats.lastRetryAt || "",
           countdownActive: stats.countdownActive || false,
           countdownSecondsLeft: stats.countdownSecondsLeft || 0,
+          waitingForPreviousInput: stats.waitingForPreviousInput || false,
+          busyAcks: stats.busyAcks || 0,
+          nativeContinueRequested: stats.nativeContinueRequested || false,
           retryHistory: stats.retryHistory || []
         },
         lastRefreshedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -4625,276 +4801,554 @@ function getControlPanelHtml() {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
     :root {
-      --bg: #0a0e14;
-      --panel: #111820;
-      --panel-2: #161e2a;
-      --txt: #e6edf3;
-      --muted: #8b99a8;
+      --bg: #0c0c0c;
+      --surface: #141414;
+      --surface-2: #1a1a1a;
+      --border: #222;
+      --border-hover: #333;
+      --txt: #e0e0e0;
+      --txt-secondary: #777;
       --accent: #00d4aa;
-      --accent2: #00b894;
-      --ok: #2ea043;
-      --warn: #d29922;
-      --bad: #f85149;
-      --glow: rgba(0, 212, 170, 0.15);
+      --accent-dim: rgba(0, 212, 170, 0.08);
+      --accent-glow: rgba(0, 212, 170, 0.12);
+      --red: #e55;
+      --red-dim: rgba(238, 85, 85, 0.08);
+      --amber: #e0a030;
+      --amber-dim: rgba(224, 160, 48, 0.08);
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      font-family: 'Inter', -apple-system, system-ui, sans-serif;
       background: var(--bg);
       color: var(--txt);
-      padding: 20px;
+      padding: 24px 20px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 14px; }
 
+    .wrap {
+      max-width: 640px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* \u2500\u2500 Cards \u2500\u2500 */
     .card {
-      background: linear-gradient(165deg, var(--panel), var(--panel-2));
-      border: 1px solid #1e2a3a;
-      border-radius: 14px;
-      padding: 16px;
-      transition: border-color 0.2s;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      transition: border-color 0.15s ease;
     }
-    .card:hover { border-color: #2a3a4e; }
-    .card.glow { border-color: var(--accent); box-shadow: 0 0 20px var(--glow); }
+    .card:hover { border-color: var(--border-hover); }
+    .card.active { border-color: rgba(0,212,170,0.25); }
 
+    /* \u2500\u2500 Header \u2500\u2500 */
     .header {
-      display: flex; align-items: center; justify-content: space-between;
-      flex-wrap: wrap; gap: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
     }
+    .header-left { display: flex; align-items: center; gap: 10px; }
+
+    .logo {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+      background: var(--accent-dim);
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
     h1 {
-      font-size: 20px; font-weight: 700;
-      background: linear-gradient(135deg, var(--accent), #00e5bf);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--txt);
+      letter-spacing: -0.2px;
     }
-    .subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    h1 span {
+      color: var(--txt-secondary);
+      font-weight: 400;
+      font-size: 12px;
+      margin-left: 6px;
+    }
 
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
-    .stat {
-      border: 1px solid #1e2a3a; border-radius: 10px; padding: 12px;
-      background: rgba(0,0,0,0.3);
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
     }
-    .stat .k {
-      color: var(--muted); font-size: 10px; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.8px;
+    .badge.on {
+      background: var(--accent-dim);
+      color: var(--accent);
     }
-    .stat .v { margin-top: 6px; font-size: 14px; font-weight: 600; word-break: break-word; }
-    .stat .v.big { font-size: 28px; font-weight: 800; }
-    .stat .v.accent { color: var(--accent); }
-    .stat .v.warn { color: var(--warn); }
-    .stat .v.bad { color: var(--bad); }
+    .badge.off {
+      background: rgba(119,119,119,0.1);
+      color: var(--txt-secondary);
+    }
 
-    .status-badge {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 700;
-      letter-spacing: 0.5px; text-transform: uppercase;
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
     }
-    .status-badge.on { background: rgba(0,212,170,0.15); color: var(--accent); }
-    .status-badge.off { background: rgba(139,153,168,0.15); color: var(--muted); }
-
-    .dot { width: 8px; height: 8px; border-radius: 50%; }
-    .dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.5s ease-in-out infinite; }
-    .dot.off { background: var(--muted); }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
-    input[type="number"] {
-      width: 100px; padding: 8px 10px;
-      background: rgba(0,0,0,0.4); border: 1px solid #1e2a3a; border-radius: 8px;
-      color: var(--txt); font-size: 13px;
+    .dot.on {
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s ease-in-out infinite;
     }
-    input[type="number"]:focus { outline: none; border-color: var(--accent); }
+    .dot.off { background: #555; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+    /* \u2500\u2500 Controls row \u2500\u2500 */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
     button {
-      border: 0; border-radius: 8px; padding: 10px 16px; font-size: 12px;
-      font-weight: 600; color: #fff; cursor: pointer;
-      transition: all 0.2s; letter-spacing: 0.3px;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--txt);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
     }
-    button:hover { transform: translateY(-1px); }
-    button:active { transform: translateY(0); }
-    button.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #000; }
-    button.secondary { background: #1e2a3a; }
-    button.warn { background: #8a6517; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-
-    .cdp-status {
-      padding: 10px 14px; border-radius: 10px; font-size: 12px;
-      border: 1px solid #1e2a3a; background: rgba(0,0,0,0.3);
+    button:hover {
+      border-color: var(--border-hover);
+      background: #1e1e1e;
     }
-    .cdp-status.ok { color: #a7f3b6; border-color: #1f6b37; }
-    .cdp-status.bad { color: #ffb2ab; border-color: #8c2f2b; }
+    button:active { transform: scale(0.97); }
+    button.primary {
+      background: var(--accent);
+      color: #000;
+      border-color: transparent;
+      font-weight: 600;
+    }
+    button.primary:hover {
+      background: #00e5bf;
+      border-color: transparent;
+    }
+    button.danger {
+      background: rgba(238,85,85,0.12);
+      border-color: rgba(238,85,85,0.2);
+      color: var(--red);
+    }
+    button.danger:hover {
+      background: rgba(238,85,85,0.18);
+    }
+    button:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
-    /* Countdown card */
+    /* \u2500\u2500 CDP pill \u2500\u2500 */
+    .cdp-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 500;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--txt-secondary);
+    }
+    .cdp-pill.ok {
+      border-color: rgba(0,212,170,0.2);
+      color: var(--accent);
+    }
+    .cdp-pill.bad {
+      border-color: rgba(238,85,85,0.2);
+      color: var(--red);
+    }
+
+    /* \u2500\u2500 Stats grid \u2500\u2500 */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .stat-item {
+      padding: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      text-align: center;
+    }
+    .stat-label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-value.accent { color: var(--accent); }
+    .stat-value.sm { font-size: 13px; font-weight: 500; }
+
+    /* \u2500\u2500 Section labels \u2500\u2500 */
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 10px;
+    }
+
+    /* \u2500\u2500 Toggle row \u2500\u2500 */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .toggle-info h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--txt);
+    }
+    .toggle-info p {
+      font-size: 11px;
+      color: var(--txt-secondary);
+      margin-top: 2px;
+    }
+
+    .toggle-btn {
+      min-width: 56px;
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 6px;
+      text-align: center;
+    }
+    .toggle-btn.is-on {
+      background: var(--accent-dim);
+      border-color: rgba(0,212,170,0.2);
+      color: var(--accent);
+    }
+
+    /* \u2500\u2500 Config \u2500\u2500 */
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .config-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .config-item label {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--txt-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .config-item input[type="number"] {
+      width: 100%;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      color: var(--txt);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: border-color 0.15s ease;
+    }
+    .config-item input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .config-item.wide {
+      grid-column: 1 / -1;
+    }
+    .slider-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .slider-wrap input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .slider-value {
+      min-width: 52px;
+      text-align: right;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+    .config-hint {
+      font-size: 11px;
+      color: var(--txt-secondary);
+      line-height: 1.4;
+    }
+
+    .save-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* \u2500\u2500 Countdown card \u2500\u2500 */
     .countdown-card {
       text-align: center;
-      border-color: var(--warn) !important;
-      box-shadow: 0 0 20px rgba(210, 153, 34, 0.15);
+      border-color: rgba(224,160,48,0.3) !important;
     }
     .countdown-number {
-      font-size: 56px;
-      font-weight: 800;
-      background: linear-gradient(135deg, var(--warn), #f0b429);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      font-size: 48px;
+      font-weight: 700;
+      color: var(--amber);
       line-height: 1;
-      animation: countdownPulse 1s ease-in-out infinite;
+      font-variant-numeric: tabular-nums;
+      animation: cdPulse 1s ease-in-out infinite;
     }
-    @keyframes countdownPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes cdPulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .countdown-bar-track {
+      margin-top: 12px;
+      height: 3px;
+      background: var(--surface-2);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .countdown-bar-fill {
+      height: 100%;
+      background: var(--amber);
+      border-radius: 2px;
+      transition: width 1s linear;
+    }
 
-    /* Retry history */
+    /* \u2500\u2500 History \u2500\u2500 */
     .history-list {
-      max-height: 200px; overflow-y: auto;
-      font-size: 12px;
+      max-height: 180px;
+      overflow-y: auto;
     }
     .history-item {
-      padding: 8px 10px;
-      border-bottom: 1px solid #1e2a3a;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
     }
     .history-item:last-child { border-bottom: none; }
-    .history-time { color: var(--muted); font-size: 11px; }
+    .history-time { color: var(--txt-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .history-pattern { color: var(--txt-secondary); font-size: 11px; margin-left: 6px; }
     .history-action {
-      color: var(--accent); font-weight: 600;
-      padding: 2px 8px; background: rgba(0,212,170,0.1);
-      border-radius: 4px; font-size: 11px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--accent);
+      padding: 2px 8px;
+      background: var(--accent-dim);
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      flex-shrink: 0;
     }
 
+    /* \u2500\u2500 Error log \u2500\u2500 */
     .error-log {
-      margin-top: 8px; padding: 10px; border-radius: 8px;
-      background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.2);
-      font-size: 12px; color: #ffb2ab; word-break: break-word;
-      max-height: 120px; overflow-y: auto;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--red-dim);
+      border: 1px solid rgba(238,85,85,0.15);
+      font-size: 12px;
+      color: #f99;
+      word-break: break-word;
+      margin-top: 8px;
+      max-height: 100px;
+      overflow-y: auto;
     }
     .error-log:empty { display: none; }
 
-    .muted { color: var(--muted); font-size: 11px; }
+    /* \u2500\u2500 Footer \u2500\u2500 */
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .footer-meta {
+      font-size: 11px;
+      color: var(--txt-secondary);
+    }
+    .footer-meta kbd {
+      font-family: inherit;
+      background: var(--surface-2);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10px;
+      border: 1px solid var(--border);
+    }
+
+    /* \u2500\u2500 Scrollbar \u2500\u2500 */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #444; }
   </style>
 </head>
 <body>
   <div class="wrap">
 
-    <div class="card glow" id="mainCard">
+    <!-- Header -->
+    <div class="card" id="mainCard">
       <div class="header">
-        <div>
-          <h1>\u26A1 AutoContinue Agent v2</h1>
-          <div class="subtitle">Automatic error detection & retry with countdown timer</div>
+        <div class="header-left">
+          <div class="logo">\u26A1</div>
+          <h1>AutoContinue<span>v2.3</span></h1>
         </div>
-        <div id="statusBadge" class="status-badge off">
+        <div id="statusBadge" class="badge off">
           <span class="dot off" id="statusDot"></span>
           <span id="statusLabel">OFF</span>
         </div>
       </div>
     </div>
 
-    <!-- COUNTDOWN CARD (only visible during active countdown) -->
+    <!-- Countdown (hidden by default) -->
     <div class="card countdown-card" id="countdownCard" style="display:none;">
-      <div style="font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">
-        \u26A1 Retrying in...
-      </div>
+      <div class="section-label" style="margin-bottom:6px;">\u26A1 Retrying in\u2026</div>
       <div class="countdown-number" id="countdownNumber">5</div>
-      <div style="font-size: 13px; color: var(--muted); margin-top: 8px;">
-        Error detected \u2014 clicking Retry button automatically
-      </div>
-      <div style="margin-top: 12px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-        <div id="countdownBar" style="height:100%; background: linear-gradient(90deg, var(--warn), #f0b429); border-radius: 2px; transition: width 1s linear; width: 100%;"></div>
+      <div style="font-size:12px; color:var(--txt-secondary); margin-top:6px;">Auto-clicking retry button</div>
+      <div class="countdown-bar-track">
+        <div class="countdown-bar-fill" id="countdownBar" style="width:100%;"></div>
       </div>
     </div>
 
+    <!-- Main controls -->
     <div class="card">
-      <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
-        <button class="primary" id="toggleBtn">Enable AutoContinue</button>
-        <button class="secondary" id="refreshBtn">Refresh</button>
+      <div class="controls">
+        <button class="primary" id="toggleBtn" style="flex:1;">Enable AutoContinue</button>
+        <button id="refreshBtn">\u21BB</button>
       </div>
-      <div id="cdpStatus" class="cdp-status">Checking CDP...</div>
+      <div id="cdpStatus" class="cdp-pill" style="margin-top:10px;">Checking CDP\u2026</div>
     </div>
 
-    <div class="card" id="bgCard" style="border-color: #1e2a3a;">
-      <div class="row" style="justify-content: space-between; align-items: center;">
-        <div>
-          <div style="font-size: 14px; font-weight: 700;">\u{1F311} Background Mode</div>
-          <div class="muted" style="margin-top: 4px;">Dark overlay with live countdown while the agent works silently</div>
+    <!-- Background mode -->
+    <div class="card" id="bgCard">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <h3>Background Mode</h3>
+          <p>Overlay + silent retry when tab is not visible</p>
         </div>
-        <button id="toggleBgBtn" class="secondary" style="min-width: 130px; padding: 10px 20px; font-size: 13px; font-weight: 700;">OFF</button>
+        <button id="toggleBgBtn" class="toggle-btn">OFF</button>
       </div>
-      <div class="muted" style="margin-top: 8px;">Shortcut: <kbd style="background:#1e2a3a; padding:2px 6px; border-radius:4px;">Ctrl+Shift+B</kbd></div>
     </div>
 
+    <!-- Stats -->
     <div class="card">
-      <div class="grid">
-        <div class="stat">
-          <div class="k">Total Retries</div>
-          <div class="v big accent" id="totalRetries">0</div>
+      <div class="section-label">Statistics</div>
+      <div class="stats">
+        <div class="stat-item">
+          <div class="stat-label">Retries</div>
+          <div class="stat-value accent" id="totalRetries">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Errors Detected</div>
-          <div class="v big" id="errorsDetected">0</div>
+        <div class="stat-item">
+          <div class="stat-label">Errors</div>
+          <div class="stat-value" id="errorsDetected">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Consecutive</div>
-          <div class="v" id="consecutiveRetries">0</div>
+        <div class="stat-item">
+          <div class="stat-label">Consecutive</div>
+          <div class="stat-value" id="consecutiveRetries">0</div>
         </div>
-        <div class="stat">
-          <div class="k">CDP Connections</div>
-          <div class="v" id="connections">0</div>
+      </div>
+      <div class="stats" style="margin-top:8px;">
+        <div class="stat-item">
+          <div class="stat-label">CDP</div>
+          <div class="stat-value sm" id="connections">0</div>
         </div>
-        <div class="stat">
-          <div class="k">Last Retry</div>
-          <div class="v" id="lastRetry">-</div>
+        <div class="stat-item">
+          <div class="stat-label">Last Retry</div>
+          <div class="stat-value sm" id="lastRetry">\u2014</div>
         </div>
-        <div class="stat">
-          <div class="k">Platform</div>
-          <div class="v" id="platform" style="font-size:11px;">-</div>
+        <div class="stat-item">
+          <div class="stat-label">Platform</div>
+          <div class="stat-value sm" id="platform">\u2014</div>
         </div>
       </div>
     </div>
 
-    <!-- Retry History -->
+    <!-- Retry History (hidden by default) -->
     <div class="card" id="historyCard" style="display:none;">
-      <div class="k" style="margin-bottom: 10px;">Recent Retries</div>
+      <div class="section-label">Recent Retries</div>
       <div class="history-list" id="historyList"></div>
     </div>
 
+    <!-- Last Error (hidden by default) -->
     <div class="card" id="errorCard" style="display:none;">
-      <div class="stat" style="border:0; padding:0; background:transparent;">
-        <div class="k">Last Error Detected</div>
-        <div class="error-log" id="lastError"></div>
-      </div>
+      <div class="section-label" id="errorLabel">Last Error</div>
+      <div class="error-log" id="lastError"></div>
     </div>
 
+    <!-- Configuration -->
     <div class="card">
-      <div class="k" style="margin-bottom: 10px;">Configuration</div>
-      <div class="row" style="gap: 14px; flex-wrap: wrap;">
-        <label>CDP Port
+      <div class="section-label">Configuration</div>
+      <div class="config-grid">
+        <div class="config-item">
+          <label>CDP Port</label>
           <input id="portInput" type="number" min="1" max="65535" step="1" />
-        </label>
-        <label>Max Retries
+        </div>
+        <div class="config-item">
+          <label>Max Retries</label>
           <input id="maxRetriesInput" type="number" min="1" max="500" step="1" />
-        </label>
-        <label>Cooldown (ms)
-          <input id="cooldownInput" type="number" min="0" max="30000" step="100" />
-        </label>
-        <label>Retry Delay (s)
-          <input id="delayInput" type="number" min="1" max="30" step="1" />
-        </label>
+        </div>
+        <div class="config-item wide">
+          <label>Processing Wait</label>
+          <div class="slider-wrap">
+            <input id="processingDelayInput" type="range" min="1" max="30" step="1" />
+            <div class="slider-value" id="processingDelayValue">5s</div>
+          </div>
+          <div class="config-hint">Fast scanning stays on. This only controls how long AutoContinue waits before retrying or sending a continue fallback.</div>
+        </div>
       </div>
-      <div class="row" style="margin-top: 10px; flex-wrap: wrap;">
-        <button class="secondary" id="savePort">Save Port</button>
-        <button class="secondary" id="saveMaxRetries">Save Max Retries</button>
-        <button class="secondary" id="saveCooldown">Save Cooldown</button>
-        <button class="secondary" id="saveDelay">Save Delay</button>
+      <div class="save-row">
+        <button id="savePort">Save Port</button>
+        <button id="saveMaxRetries">Save Retries</button>
       </div>
     </div>
 
+    <!-- Footer -->
     <div class="card">
-      <div class="row">
-        <button class="secondary" id="copyDiagnostics">Copy Diagnostics</button>
-        <button class="secondary" id="openOutputLog">Open Output Log</button>
+      <div class="footer">
+        <div class="controls">
+          <button id="copyDiagnostics">Copy Diagnostics</button>
+          <button id="openOutputLog">Output Log</button>
+        </div>
+        <div class="footer-meta">
+          <kbd>\u2318\u21E7K</kbd> toggle \xB7 IDE: <span id="ide">\u2014</span>
+        </div>
       </div>
-      <div class="muted" style="margin-top: 10px;">Last refresh: <span id="lastRefreshed">-</span></div>
-      <div class="muted">Shortcut: <kbd>Ctrl+Shift+K</kbd> (toggle) | IDE: <span id="ide">-</span></div>
+      <div class="footer-meta" style="margin-top:8px;">Last refresh: <span id="lastRefreshed">\u2014</span></div>
     </div>
 
   </div>
@@ -4905,7 +5359,6 @@ function getControlPanelHtml() {
     function post(type, payload = {}) { vscode.postMessage({ type, ...payload }); }
 
     function render(s) {
-      // Status badge
       const badge = byId('statusBadge');
       const dot = byId('statusDot');
       const label = byId('statusLabel');
@@ -4913,56 +5366,52 @@ function getControlPanelHtml() {
       const toggleBtn = byId('toggleBtn');
 
       if (s.isEnabled && s.backgroundModeEnabled) {
-        badge.className = 'status-badge on';
+        badge.className = 'badge on';
         dot.className = 'dot on';
         label.textContent = 'BG MODE';
-        mainCard.classList.add('glow');
-        toggleBtn.textContent = 'Disable AutoContinue';
-        toggleBtn.className = 'button warn';
-        toggleBtn.style.background = '#8a6517';
+        mainCard.classList.add('active');
+        toggleBtn.textContent = 'Disable';
+        toggleBtn.className = 'danger';
+        toggleBtn.style.cssText = 'flex:1;';
       } else if (s.isEnabled) {
-        badge.className = 'status-badge on';
+        badge.className = 'badge on';
         dot.className = 'dot on';
         label.textContent = 'ACTIVE';
-        mainCard.classList.add('glow');
-        toggleBtn.textContent = 'Disable AutoContinue';
-        toggleBtn.className = 'button warn';
-        toggleBtn.style.background = '#8a6517';
+        mainCard.classList.add('active');
+        toggleBtn.textContent = 'Disable';
+        toggleBtn.className = 'danger';
+        toggleBtn.style.cssText = 'flex:1;';
       } else {
-        badge.className = 'status-badge off';
+        badge.className = 'badge off';
         dot.className = 'dot off';
         label.textContent = 'OFF';
-        mainCard.classList.remove('glow');
+        mainCard.classList.remove('active');
         toggleBtn.textContent = 'Enable AutoContinue';
-        toggleBtn.className = 'button primary';
-        toggleBtn.style.background = '';
+        toggleBtn.className = 'primary';
+        toggleBtn.style.cssText = 'flex:1;';
       }
 
       const bgBtn = byId('toggleBgBtn');
       const bgCard = byId('bgCard');
 
       if (s.backgroundModeEnabled) {
-        bgBtn.textContent = '\u2713 ON';
-        bgBtn.style.background = 'linear-gradient(135deg, #1f6b37, #2ea043)';
-        bgBtn.style.color = '#fff';
-        bgCard.style.borderColor = '#2ea043';
-        bgCard.style.boxShadow = '0 0 15px rgba(46, 160, 67, 0.15)';
+        bgBtn.textContent = 'ON';
+        bgBtn.className = 'toggle-btn is-on';
+        bgCard.style.borderColor = 'rgba(0,212,170,0.2)';
       } else {
         bgBtn.textContent = 'OFF';
-        bgBtn.style.background = '';
-        bgBtn.style.color = '';
-        bgCard.style.borderColor = '#1e2a3a';
-        bgCard.style.boxShadow = '';
+        bgBtn.className = 'toggle-btn';
+        bgCard.style.borderColor = '';
       }
 
       // CDP status
       const cdpEl = byId('cdpStatus');
       if (s.cdpReady) {
-        cdpEl.textContent = 'CDP connected on port ' + s.cdpPort + ' (' + s.connectionCount + ' target' + (s.connectionCount !== 1 ? 's' : '') + ')';
-        cdpEl.className = 'cdp-status ok';
+        cdpEl.textContent = 'Port ' + s.cdpPort + ' \xB7 ' + s.connectionCount + ' target' + (s.connectionCount !== 1 ? 's' : '') + ' connected';
+        cdpEl.className = 'cdp-pill ok';
       } else {
-        cdpEl.textContent = 'CDP not available on port ' + s.cdpPort + '. Launch IDE with --remote-debugging-port=' + s.cdpPort;
-        cdpEl.className = 'cdp-status bad';
+        cdpEl.textContent = 'CDP unavailable \xB7 port ' + s.cdpPort;
+        cdpEl.className = 'cdp-pill bad';
       }
 
       // Countdown card
@@ -4971,7 +5420,7 @@ function getControlPanelHtml() {
       if (stats.countdownActive && stats.countdownSecondsLeft > 0) {
         countdownCard.style.display = '';
         byId('countdownNumber').textContent = String(stats.countdownSecondsLeft);
-        const totalDelay = s.retryDelaySeconds || 5;
+        const totalDelay = s.processingDelaySeconds || s.retryDelaySeconds || 5;
         const pct = Math.max(0, (stats.countdownSecondsLeft / totalDelay) * 100);
         byId('countdownBar').style.width = pct + '%';
       } else {
@@ -4983,18 +5432,17 @@ function getControlPanelHtml() {
       byId('errorsDetected').textContent = String(stats.errorsDetected || 0);
       byId('consecutiveRetries').textContent = String(stats.consecutiveRetries || 0);
       byId('connections').textContent = String(s.connectionCount || 0);
-      byId('ide').textContent = s.ide || '-';
-      byId('platform').textContent = s.platform || '-';
+      byId('ide').textContent = s.ide || '\u2014';
+      byId('platform').textContent = s.platform || '\u2014';
 
       if (stats.lastRetryAt) {
         try {
-          const d = new Date(stats.lastRetryAt);
-          byId('lastRetry').textContent = d.toLocaleTimeString();
+          byId('lastRetry').textContent = new Date(stats.lastRetryAt).toLocaleTimeString();
         } catch (e) {
           byId('lastRetry').textContent = stats.lastRetryAt;
         }
       } else {
-        byId('lastRetry').textContent = '-';
+        byId('lastRetry').textContent = '\u2014';
       }
 
       // Retry history
@@ -5004,10 +5452,11 @@ function getControlPanelHtml() {
       if (history.length > 0) {
         historyCard.style.display = '';
         historyList.innerHTML = history.slice().reverse().map(h => {
-          let timeStr = '-';
+          let timeStr = '\u2014';
           try { timeStr = new Date(h.at).toLocaleTimeString(); } catch(e) {}
           return '<div class="history-item">' +
-            '<div><span class="history-time">' + timeStr + '</span> &mdash; ' + (h.pattern || '-').slice(0, 50) + '</div>' +
+            '<div><span class="history-time">' + timeStr + '</span>' +
+            '<span class="history-pattern"> \xB7 ' + (h.pattern || '\u2014').slice(0, 40) + '</span></div>' +
             '<span class="history-action">' + (h.action || 'retry') + '</span>' +
           '</div>';
         }).join('');
@@ -5017,21 +5466,26 @@ function getControlPanelHtml() {
 
       // Error card
       const errorCard = byId('errorCard');
+      const errorLabel = byId('errorLabel');
       const errorEl = byId('lastError');
-      if (stats.lastError) {
+      if (stats.waitingForPreviousInput && stats.lastBusyPattern) {
         errorCard.style.display = '';
+        errorLabel.textContent = 'Input Queue';
+        errorEl.textContent = stats.lastBusyPattern + ' \u2014 waiting instead of sending another continue.';
+      } else if (stats.lastError) {
+        errorCard.style.display = '';
+        errorLabel.textContent = 'Last Error';
         errorEl.textContent = stats.lastError;
       } else {
         errorCard.style.display = 'none';
       }
 
-      // Config inputs \u2014 only update when the user is NOT focused on them
-      // (otherwise the 2s refresh overwrites what they're typing)
+      // Config inputs \u2014 only update when user is NOT focused
       const activeId = document.activeElement ? document.activeElement.id : '';
       if (activeId !== 'portInput') byId('portInput').value = String(s.cdpPort || 9000);
       if (activeId !== 'maxRetriesInput') byId('maxRetriesInput').value = String(s.maxRetries || 50);
-      if (activeId !== 'cooldownInput') byId('cooldownInput').value = String(s.retryCooldownMs != null ? s.retryCooldownMs : 5000);
-      if (activeId !== 'delayInput') byId('delayInput').value = String(s.retryDelaySeconds || 5);
+      if (activeId !== 'processingDelayInput') byId('processingDelayInput').value = String(s.processingDelaySeconds || 5);
+      byId('processingDelayValue').textContent = String(s.processingDelaySeconds || 5) + 's';
 
       // Timestamps
       if (s.lastRefreshedAt) {
@@ -5055,8 +5509,12 @@ function getControlPanelHtml() {
     byId('refreshBtn').addEventListener('click', () => post('refresh'));
     byId('savePort').addEventListener('click', () => post('savePort', { port: Number(byId('portInput').value) }));
     byId('saveMaxRetries').addEventListener('click', () => post('saveMaxRetries', { value: Number(byId('maxRetriesInput').value) }));
-    byId('saveCooldown').addEventListener('click', () => post('saveCooldown', { value: Number(byId('cooldownInput').value) }));
-    byId('saveDelay').addEventListener('click', () => post('saveDelay', { value: Number(byId('delayInput').value) }));
+    byId('processingDelayInput').addEventListener('input', () => {
+      byId('processingDelayValue').textContent = String(byId('processingDelayInput').value) + 's';
+    });
+    byId('processingDelayInput').addEventListener('change', () => {
+      post('saveProcessingDelay', { value: Number(byId('processingDelayInput').value) });
+    });
     byId('copyDiagnostics').addEventListener('click', () => post('copyDiagnostics'));
     byId('openOutputLog').addEventListener('click', () => post('openOutputLog'));
 
@@ -5082,6 +5540,7 @@ async function handleCopyDiagnostics() {
       `cdpReady=${cdpReady}`,
       `connectionCount=${cdpHandler ? cdpHandler.getConnectionCount() : 0}`,
       `pollInterval=${pollInterval}`,
+      `processingDelaySeconds=${processingDelaySeconds}`,
       `maxRetries=${maxRetries}`,
       `retryCooldownMs=${retryCooldownMs}`,
       `retryDelaySeconds=${retryDelaySeconds}`,
@@ -5090,6 +5549,10 @@ async function handleCopyDiagnostics() {
       `stats.errorsDetected=${stats.errorsDetected || 0}`,
       `stats.consecutiveRetries=${stats.consecutiveRetries || 0}`,
       `stats.countdownActive=${stats.countdownActive || false}`,
+      `stats.waitingForPreviousInput=${stats.waitingForPreviousInput || false}`,
+      `stats.lastBusyPattern=${stats.lastBusyPattern || "-"}`,
+      `stats.busyAcks=${stats.busyAcks || 0}`,
+      `stats.nativeContinueRequested=${stats.nativeContinueRequested || false}`,
       `stats.lastError=${stats.lastError || "-"}`,
       `stats.lastRetryAt=${stats.lastRetryAt || "-"}`
     ];
@@ -5108,10 +5571,6 @@ function deactivate() {
   if (cdpRefreshTimer) {
     clearInterval(cdpRefreshTimer);
     cdpRefreshTimer = null;
-  }
-  if (nativeCommandTimer) {
-    clearInterval(nativeCommandTimer);
-    nativeCommandTimer = null;
   }
   if (activePollingTimer) {
     clearInterval(activePollingTimer);

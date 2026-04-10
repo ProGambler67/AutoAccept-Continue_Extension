@@ -2,7 +2,7 @@
   "name": "antigravity-autocontinue",
   "displayName": "Antigravity AutoContinue Agent",
   "description": "Automatically retries and continues when Antigravity encounters server errors, rate limits, or interrupted agent flows. Detects errors, shows a countdown timer, and clicks the Retry button automatically. Works in background mode.",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "pesosz",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -27,6 +27,7 @@
   ],
   "scripts": {
     "compile": "esbuild extension.js --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs",
+    "test": "node --test",
     "vscode:prepublish": "npm run compile",
     "package": "npx vsce package",
     "build:vsix": "npm run compile && npm run package"
@@ -88,19 +89,26 @@
           "maximum": 500,
           "description": "Maximum consecutive retries before auto-pausing (resets on success)"
         },
+        "autoContinue.processingDelaySeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "How many seconds AutoContinue should wait before retrying or sending a continue fallback"
+        },
         "autoContinue.retryCooldownMs": {
           "type": "number",
           "default": 5000,
           "minimum": 0,
           "maximum": 30000,
-          "description": "Minimum cooldown between retry attempts in milliseconds"
+          "description": "Legacy advanced override for retry cooldown in milliseconds"
         },
         "autoContinue.retryDelaySeconds": {
           "type": "number",
           "default": 5,
           "minimum": 1,
           "maximum": 30,
-          "description": "Countdown duration in seconds before clicking the Retry button"
+          "description": "Legacy advanced override for retry countdown in seconds"
         },
         "autoContinue.enableNativeCommands": {
           "type": "boolean",

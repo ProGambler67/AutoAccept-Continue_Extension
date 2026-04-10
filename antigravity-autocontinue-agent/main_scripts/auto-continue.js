@@ -1,14 +1,9 @@
 /**
- * Antigravity AutoContinue Agent v2.2 — Injected DOM Script
+ * Antigravity AutoContinue Agent v2.3 — Injected DOM Script
  *
- * Detects errors anywhere on the page, finds Retry buttons, counts down, clicks.
- * 
- * v2.2 fixes:
- *  - Scans ENTIRE body for error text (v2.1 was too narrow, missed errors)
- *  - Countdown wrapped in try/finally (never gets stuck)
- *  - No re-check during countdown (just count down and click)
- *  - Triple click dispatch (click + MouseEvent + PointerEvent)
- *  - NEVER types into chat
+ * Detects recoverable errors anywhere on the page, finds Retry/Continue buttons,
+ * waits out a processing window, and only falls back to native continue requests
+ * when the page explicitly needs them.
  */
 (function () {
     'use strict';
@@ -20,7 +15,15 @@
     const log = (msg) => {
         try { console.log(`${LOG_PREFIX} ${msg}`); } catch (e) { }
     };
-    log('Script v2.2 loaded');
+    const CORE = globalThis.AutoContinueRecoveryCore || {};
+    const detectBusyPatternFromText = CORE.detectBusyPattern || (() => '');
+    const shouldUseRemotePoll = CORE.shouldUseRemotePoll || (({ isBackgroundMode, documentHidden, visibilityState }) => {
+        if (isBackgroundMode) return true;
+        if (documentHidden) return true;
+        return visibilityState === 'hidden';
+    });
+
+    log('Script v2.3 loaded');
 
     // =================================================================
     // ERROR PATTERNS
@@ -189,6 +192,54 @@
         return { found: false, pattern: '' };
     }
 
+    function detectBusySignal() {
+        const bodyText = (() => {
+            try {
+                return (document.body?.textContent || '').toLowerCase();
+            } catch (e) { return ''; }
+        })();
+
+        if (!bodyText) return { found: false, pattern: '' };
+
+        const pattern = detectBusyPatternFromText(bodyText);
+        if (!pattern) return { found: false, pattern: '' };
+
+        return { found: true, pattern };
+    }
+
+    function findBusyClickTarget(pattern) {
+        if (!pattern) return null;
+
+        const nodes = qAll('[role="alert"], [role="status"], [role="button"], button, div, span');
+        for (const node of nodes) {
+            if (!isVisible(node)) continue;
+            const text = getElText(node);
+            if (!text || !text.includes(pattern)) continue;
+
+            const clickable = node.closest('button, [role="button"], [class*="cursor-pointer"], .cursor-pointer, [onclick]');
+            if (clickable && isVisible(clickable)) {
+                return clickable;
+            }
+        }
+
+        return null;
+    }
+
+    function acknowledgeBusySignal(state, pattern) {
+        const now = Date.now();
+        if ((now - (state.lastBusyClickAt || 0)) < 3000) return false;
+
+        const target = findBusyClickTarget(pattern);
+        if (!target) return false;
+
+        const ok = clickBtn(target, 'busy-ack');
+        if (ok) {
+            state.lastBusyClickAt = now;
+            state.busyAcks = (state.busyAcks || 0) + 1;
+        }
+        return ok;
+    }
+
     // =================================================================
     // RETRY BUTTON FINDING
     // =================================================================
@@ -267,6 +318,27 @@
         }
 
         return candidates;
+    }
+
+    function isAgentActivelyRunning() {
+        const buttons = qAll('button, [role="button"], a[role="button"]');
+
+        for (const btn of buttons) {
+            if (!isVisible(btn)) continue;
+
+            try {
+                const inDialog = !!btn.closest('[role="dialog"], .notification-toast, .notification-list-item, .monaco-dialog-box, .monaco-dialog-modal-block, [class*="notification"], [class*="toast"]');
+                if (inDialog) continue;
+            } catch (e) { }
+
+            const text = getElText(btn);
+            if (!text) continue;
+            if (/\bstop\b/i.test(text) && !/\bstop listening\b/i.test(text)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // =================================================================
@@ -427,18 +499,68 @@
             maxRetries: 50,
             retryCooldownMs: 5000,
             retryDelaySeconds: 5,
+            processingDelaySeconds: 5,
             lastRetryAt: 0,
             lastRetryAction: '',
             lastError: '',
+            lastBusyPattern: '',
             lastHandledSig: '',
+            nativeContinueRequested: false,
+            nativeContinuePattern: '',
+            nativeContinueRequestedAt: 0,
+            lastBusyClickAt: 0,
+            busyAcks: 0,
+            waitingForPreviousInput: false,
             countdownActive: false,
             countdownSecondsLeft: 0,
             pausedForMaxRetries: false,
+            pendingAutoActionPattern: '',
+            pendingAutoActionSince: 0,
             _interval: null,
             _observer: null,
             _ovInterval: null,
             retryHistory: []
         };
+    }
+
+    function clearPendingAutoAction(state) {
+        const hadPending = !!state.pendingAutoActionPattern || !!state.pendingAutoActionSince;
+        state.pendingAutoActionPattern = '';
+        state.pendingAutoActionSince = 0;
+        if (hadPending) {
+            state.countdownActive = false;
+            state.countdownSecondsLeft = 0;
+            updateOverlay(state);
+        }
+    }
+
+    function armPendingAutoAction(state, pattern, now) {
+        const holdMs = Math.max(1000, (state.retryDelaySeconds || 5) * 1000);
+
+        if (state.pendingAutoActionPattern !== pattern) {
+            state.pendingAutoActionPattern = pattern;
+            state.pendingAutoActionSince = now;
+        }
+
+        const elapsedMs = Math.max(0, now - (state.pendingAutoActionSince || now));
+        const remainingMs = Math.max(0, holdMs - elapsedMs);
+        state.countdownActive = remainingMs > 0;
+        state.countdownSecondsLeft = remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+        updateOverlay(state);
+
+        return remainingMs <= 0;
+    }
+
+    function setNativeContinueRequest(state, pattern, now) {
+        state.nativeContinueRequested = true;
+        state.nativeContinuePattern = pattern;
+        state.nativeContinueRequestedAt = now;
+    }
+
+    function clearNativeContinueRequest(state) {
+        state.nativeContinueRequested = false;
+        state.nativeContinuePattern = '';
+        state.nativeContinueRequestedAt = 0;
     }
 
     // =================================================================
@@ -450,7 +572,8 @@
 
     function tick(state) {
         if (!state.isRunning) return;
-        if (state.countdownActive) return;
+        if (state.isBackgroundMode) return;
+        if (state.countdownActive && !state.pendingAutoActionPattern) return;
 
         const now = Date.now();
         if ((now - state.lastRetryAt) < state.retryCooldownMs) return;
@@ -475,6 +598,24 @@
 
         _tickCount++;
 
+        const busy = detectBusySignal();
+        if (busy.found) {
+            state.waitingForPreviousInput = true;
+            state.lastBusyPattern = busy.pattern;
+            clearNativeContinueRequest(state);
+            clearPendingAutoAction(state);
+            acknowledgeBusySignal(state, busy.pattern);
+
+            if (busy.pattern !== state._lastBusyPattern) {
+                state._lastBusyPattern = busy.pattern;
+                log(`Busy: "${busy.pattern}" — waiting for the current input to finish`);
+            }
+            return;
+        }
+
+        state.waitingForPreviousInput = false;
+        state.lastBusyPattern = '';
+
         // 1. Detect error anywhere on the page
         const error = detectError();
 
@@ -485,6 +626,8 @@
         }
 
         if (!error.found) {
+            clearPendingAutoAction(state);
+            clearNativeContinueRequest(state);
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
                 state.consecutiveRetries = 0;
                 state.lastHandledSig = '';
@@ -496,13 +639,23 @@
         // 2. Find retry buttons
         const buttons = findRetryButtons();
         if (buttons.length === 0) {
+            const readyForFallback = armPendingAutoAction(state, error.pattern, now);
+
             // Log this once per error detection
             if (error.pattern !== state._lastNoButtonPattern) {
                 log(`Error "${error.pattern}" found but no Retry button visible`);
                 state._lastNoButtonPattern = error.pattern;
             }
+
+            if (readyForFallback && !isAgentActivelyRunning()) {
+                setNativeContinueRequest(state, error.pattern, now);
+                log(`Requesting native continue fallback for "${error.pattern}"`);
+            }
             return;
         }
+
+        clearPendingAutoAction(state);
+        clearNativeContinueRequest(state);
 
         // 3. Dedup
         const sig = error.pattern;
@@ -521,6 +674,8 @@
 
     async function doCountdownAndClick(state, pattern, bestMatch) {
         const delay = state.retryDelaySeconds || 5;
+        clearPendingAutoAction(state);
+        clearNativeContinueRequest(state);
         state.countdownActive = true;
         state.countdownSecondsLeft = delay;
 
@@ -556,6 +711,7 @@
                 state.lastRetryAt = Date.now();
                 state.lastRetryAction = target.label || 'retry';
                 state.lastHandledSig = pattern;
+                state.waitingForPreviousInput = false;
                 state.retryHistory.push({
                     at: new Date().toISOString(),
                     pattern,
@@ -588,6 +744,7 @@
             errorsDetected: s.errorsDetected || 0,
             consecutiveRetries: s.consecutiveRetries || 0,
             lastError: s.lastError || '',
+            lastBusyPattern: s.lastBusyPattern || '',
             lastRetryAction: s.lastRetryAction || '',
             lastRetryAt: s.lastRetryAt ? new Date(s.lastRetryAt).toISOString() : '',
             isRunning: !!s.isRunning,
@@ -595,6 +752,9 @@
             pausedForMaxRetries: !!s.pausedForMaxRetries,
             countdownActive: !!s.countdownActive,
             countdownSecondsLeft: s.countdownSecondsLeft || 0,
+            waitingForPreviousInput: !!s.waitingForPreviousInput,
+            busyAcks: s.busyAcks || 0,
+            nativeContinueRequested: !!s.nativeContinueRequested,
             retryHistory: (s.retryHistory || []).slice(-10)
         };
     };
@@ -607,34 +767,63 @@
      */
     window.__autoContinuePollOnce = function () {
         const state = window.__autoContinueState;
-        const result = { errorFound: false, pattern: '', buttonFound: false, clicked: false, skipped: '' };
+        const result = {
+            errorFound: false,
+            pattern: '',
+            buttonFound: false,
+            clicked: false,
+            skipped: '',
+            busyPattern: '',
+            requestNativeContinue: false,
+            isAgentRunning: false
+        };
 
         if (!state || !state.isRunning) {
             result.skipped = 'not-running';
             return result;
         }
 
-        // If the tab is visible, the foreground tick() handles retries
-        // with the countdown UI. Only act when the tab is backgrounded/hidden.
+        let remotePollAllowed = false;
         try {
-            if (!document.hidden && document.visibilityState !== 'hidden') {
-                result.skipped = 'tab-visible';
-                return result;
-            }
-        } catch (e) { }
+            remotePollAllowed = shouldUseRemotePoll({
+                isBackgroundMode: !!state.isBackgroundMode,
+                documentHidden: !!document.hidden,
+                visibilityState: document.visibilityState || ''
+            });
+        } catch (e) {
+            remotePollAllowed = !!state.isBackgroundMode;
+        }
 
-        // Don't interfere with an active countdown from the foreground tick
-        if (state.countdownActive) {
+        if (!remotePollAllowed && !state.nativeContinueRequested) {
+            result.skipped = 'tab-visible';
+            return result;
+        }
+
+        // Don't interfere with an active foreground countdown.
+        if (state.countdownActive && !state.pendingAutoActionPattern && !state.nativeContinueRequested) {
             result.skipped = 'countdown-active';
             return result;
         }
 
-        // Respect cooldown
         const now = Date.now();
         if ((now - state.lastRetryAt) < state.retryCooldownMs) {
             result.skipped = 'cooldown';
             return result;
         }
+
+        const busy = detectBusySignal();
+        if (busy.found) {
+            state.waitingForPreviousInput = true;
+            state.lastBusyPattern = busy.pattern;
+            clearNativeContinueRequest(state);
+            clearPendingAutoAction(state);
+            result.busyPattern = busy.pattern;
+            result.skipped = 'busy';
+            return result;
+        }
+
+        state.waitingForPreviousInput = false;
+        state.lastBusyPattern = '';
 
         // Max retries guard
         if (state.consecutiveRetries >= state.maxRetries) {
@@ -642,6 +831,8 @@
             if (!e.found) {
                 state.consecutiveRetries = 0;
                 state.pausedForMaxRetries = false;
+                clearPendingAutoAction(state);
+                clearNativeContinueRequest(state);
             }
             result.skipped = 'max-retries';
             return result;
@@ -653,6 +844,8 @@
         result.pattern = error.pattern;
 
         if (!error.found) {
+            clearPendingAutoAction(state);
+            clearNativeContinueRequest(state);
             // Reset consecutive if enough time passed
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
                 state.consecutiveRetries = 0;
@@ -665,10 +858,24 @@
         // 2. Find retry buttons
         const buttons = findRetryButtons();
         result.buttonFound = buttons.length > 0;
+        result.isAgentRunning = isAgentActivelyRunning();
 
         if (buttons.length === 0) {
+            const readyForFallback = armPendingAutoAction(state, error.pattern, now);
+
+            if (readyForFallback && !result.isAgentRunning) {
+                setNativeContinueRequest(state, error.pattern, now);
+                result.requestNativeContinue = true;
+            } else if (!readyForFallback) {
+                result.skipped = 'arming';
+            } else {
+                result.skipped = 'agent-running';
+            }
+
             return result;
         }
+
+        clearNativeContinueRequest(state);
 
         // 3. Dedup — don't re-click the same error too quickly
         const sig = error.pattern;
@@ -677,12 +884,17 @@
             return result;
         }
 
+        const readyForRetry = armPendingAutoAction(state, error.pattern, now);
+        if (!readyForRetry) {
+            result.skipped = 'arming';
+            return result;
+        }
+
+        clearPendingAutoAction(state);
         state.errorsDetected++;
         state.lastError = error.pattern;
 
-        // 4. In background mode via remote poll: click immediately (no countdown)
-        //    The user isn't looking at this tab, so a visual countdown is pointless.
-        log(`[RemotePoll] Error "${error.pattern}" — clicking "${buttons[0].text}" immediately`);
+        log(`[RemotePoll] Error "${error.pattern}" — clicking "${buttons[0].text}"`);
 
         const ok = clickBtn(buttons[0].btn, 'remote-poll');
         result.clicked = ok;
@@ -693,6 +905,7 @@
             state.lastRetryAt = Date.now();
             state.lastRetryAction = buttons[0].label || 'retry';
             state.lastHandledSig = error.pattern;
+            state.waitingForPreviousInput = false;
             state.retryHistory.push({
                 at: new Date().toISOString(),
                 pattern: error.pattern,
@@ -709,6 +922,59 @@
         return result;
     };
 
+    function startForegroundInterval(state) {
+        if (state._interval) {
+            clearInterval(state._interval);
+            state._interval = null;
+        }
+
+        const pollMs = state.pollInterval || 250;
+        state._interval = setInterval(() => {
+            if (state.isRunning) tick(state);
+        }, pollMs);
+        log('Poll active (' + pollMs + 'ms)');
+    }
+
+    function syncOverlayState(state) {
+        if (state._ovInterval) {
+            clearInterval(state._ovInterval);
+            state._ovInterval = null;
+        }
+
+        if (state.isBackgroundMode) {
+            showOverlay();
+            updateOverlay(state);
+            state._ovInterval = setInterval(() => {
+                if (state.isRunning && state.isBackgroundMode) updateOverlay(state);
+            }, 500);
+        } else {
+            hideOverlay();
+        }
+    }
+
+    function applyRuntimeConfig(state, config) {
+        state.maxRetries = config.maxRetries || state.maxRetries || 50;
+        state.retryCooldownMs = config.retryCooldownMs || state.retryCooldownMs || 5000;
+        state.retryDelaySeconds = config.retryDelaySeconds || state.retryDelaySeconds || 5;
+        state.processingDelaySeconds = config.processingDelaySeconds || state.retryDelaySeconds || 5;
+
+        const nextPollInterval = Number(config.pollInterval) || state.pollInterval || 250;
+        const pollChanged = state.pollInterval !== nextPollInterval;
+        state.pollInterval = nextPollInterval;
+
+        const nextBackgroundMode = !!config.isBackgroundMode;
+        const backgroundChanged = state.isBackgroundMode !== nextBackgroundMode;
+        state.isBackgroundMode = nextBackgroundMode;
+
+        if (state.isRunning && (pollChanged || !state._interval)) {
+            startForegroundInterval(state);
+        }
+
+        if (state.isRunning && (backgroundChanged || !state._ovInterval || !state.isBackgroundMode)) {
+            syncOverlayState(state);
+        }
+    }
+
     window.__autoContinueStart = function (config) {
         const state = window.__autoContinueState;
         if (state.isRunning) {
@@ -718,19 +984,20 @@
 
         state.isRunning = true;
         state.sessionID++;
-        state.maxRetries = config.maxRetries || 50;
-        state.retryCooldownMs = config.retryCooldownMs || 5000;
-        state.retryDelaySeconds = config.retryDelaySeconds || 5;
-        state.isBackgroundMode = !!config.isBackgroundMode;
         state.consecutiveRetries = 0;
         state.lastRetryAt = 0;
         state.lastError = '';
+        state.lastBusyPattern = '';
         state.lastHandledSig = '';
+        state.waitingForPreviousInput = false;
         state.countdownActive = false;
         state.countdownSecondsLeft = 0;
         state.pausedForMaxRetries = false;
+        clearPendingAutoAction(state);
+        clearNativeContinueRequest(state);
+        applyRuntimeConfig(state, config || {});
 
-        log(`STARTED v2.2: delay=${state.retryDelaySeconds}s cooldown=${state.retryCooldownMs}ms bg=${state.isBackgroundMode}`);
+        log(`STARTED v2.3: delay=${state.retryDelaySeconds}s cooldown=${state.retryCooldownMs}ms bg=${state.isBackgroundMode}`);
 
         // MutationObserver
         if (state._observer) try { state._observer.disconnect(); } catch (e) { }
@@ -748,26 +1015,23 @@
             log('MutationObserver active');
         } catch (e) { log('Observer failed: ' + e.message); }
 
-        // Poll fallback (500ms)
-        state._interval = setInterval(() => {
-            if (state.isRunning) tick(state);
-        }, config.pollInterval || 500);
-        log('Poll active (' + (config.pollInterval || 500) + 'ms)');
+        startForegroundInterval(state);
+        syncOverlayState(state);
 
-        // Background overlay
-        if (state.isBackgroundMode) {
-            showOverlay();
-            state._ovInterval = setInterval(() => {
-                if (state.isRunning && state.isBackgroundMode) updateOverlay(state);
-            }, 500);
-        } else {
-            hideOverlay();
+        if (!state.isBackgroundMode) {
+            tick(state);
         }
 
-        // Do an immediate scan
-        tick(state);
-
         log('ACTIVE ✓');
+    };
+
+    window.__autoContinueUpdateConfig = function (config) {
+        const state = window.__autoContinueState;
+        if (!state || !state.isRunning) return;
+
+        applyRuntimeConfig(state, config || {});
+        updateOverlay(state);
+        log(`UPDATED: delay=${state.retryDelaySeconds}s cooldown=${state.retryCooldownMs}ms bg=${state.isBackgroundMode}`);
     };
 
     window.__autoContinueStop = function () {
@@ -775,6 +1039,10 @@
         state.isRunning = false;
         state.countdownActive = false;
         state.countdownSecondsLeft = 0;
+        state.waitingForPreviousInput = false;
+        state.lastBusyPattern = '';
+        clearPendingAutoAction(state);
+        clearNativeContinueRequest(state);
         if (state._interval) { clearInterval(state._interval); state._interval = null; }
         if (state._ovInterval) { clearInterval(state._ovInterval); state._ovInterval = null; }
         if (state._observer) { try { state._observer.disconnect(); } catch (e) { } state._observer = null; }
@@ -783,5 +1051,5 @@
         log('STOPPED. Retries: ' + state.retries + ' Errors: ' + state.errorsDetected);
     };
 
-    log('v2.2 Ready');
+    log('v2.3 Ready');
 })();

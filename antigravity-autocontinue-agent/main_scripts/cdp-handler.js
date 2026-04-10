@@ -23,35 +23,51 @@ function normalizePortRange(value, fallback = DEFAULT_PORT_RANGE) {
     return range;
 }
 
-// Load auto-continue.js script (with cache-busting on file change)
+// Load browser-side scripts (with cache-busting on file change)
 let _autoContinueScript = null;
-let _autoContinueScriptMtime = 0;
+let _autoContinueScriptCacheKey = '';
+
+function findExistingScript(candidates, label) {
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    throw new Error(`${label} not found. __dirname=${__dirname}`);
+}
 
 function getAutoContinueScript() {
-    const candidates = [
+    const recoveryCorePath = findExistingScript([
+        path.join(__dirname, 'recovery-core.js'),
+        path.join(__dirname, 'main_scripts', 'recovery-core.js'),
+        path.join(__dirname, '..', 'main_scripts', 'recovery-core.js')
+    ], 'recovery-core.js');
+
+    const autoContinuePath = findExistingScript([
         path.join(__dirname, 'auto-continue.js'),
         path.join(__dirname, 'main_scripts', 'auto-continue.js'),
         path.join(__dirname, '..', 'main_scripts', 'auto-continue.js')
-    ];
+    ], 'auto-continue.js');
 
-    for (const scriptPath of candidates) {
-        if (fs.existsSync(scriptPath)) {
-            try {
-                const stat = fs.statSync(scriptPath);
-                const mtime = stat.mtimeMs || 0;
-                if (_autoContinueScript && mtime === _autoContinueScriptMtime) {
-                    return _autoContinueScript;
-                }
-                _autoContinueScript = fs.readFileSync(scriptPath, 'utf8');
-                _autoContinueScriptMtime = mtime;
-                return _autoContinueScript;
-            } catch (e) {
-                // Fall through to next candidate
-            }
-        }
+    const recoveryCoreStat = fs.statSync(recoveryCorePath);
+    const autoContinueStat = fs.statSync(autoContinuePath);
+    const cacheKey = [
+        recoveryCorePath,
+        recoveryCoreStat.mtimeMs || 0,
+        autoContinuePath,
+        autoContinueStat.mtimeMs || 0
+    ].join(':');
+
+    if (_autoContinueScript && cacheKey === _autoContinueScriptCacheKey) {
+        return _autoContinueScript;
     }
 
-    throw new Error(`auto-continue.js not found. __dirname=${__dirname}`);
+    const recoveryCoreScript = fs.readFileSync(recoveryCorePath, 'utf8');
+    const autoContinueScript = fs.readFileSync(autoContinuePath, 'utf8');
+
+    _autoContinueScript = `${recoveryCoreScript}\n;\n${autoContinueScript}`;
+    _autoContinueScriptCacheKey = cacheKey;
+    return _autoContinueScript;
 }
 
 class CDPHandler {
@@ -131,6 +147,7 @@ class CDPHandler {
         const configHash = JSON.stringify({
             p: this.basePort,
             r: this.portRange,
+            pd: config?.processingDelaySeconds || 5,
             mr: config?.maxRetries || 50,
             cd: config?.retryCooldownMs || 5000,
             ds: config?.retryDelaySeconds || 5
@@ -335,16 +352,20 @@ class CDPHandler {
                 isRunning = false;
             }
 
+            const configJson = JSON.stringify({
+                processingDelaySeconds: config.processingDelaySeconds || config.retryDelaySeconds || 5,
+                maxRetries: config.maxRetries || 50,
+                retryCooldownMs: config.retryCooldownMs || 5000,
+                retryDelaySeconds: config.retryDelaySeconds || 5,
+                pollInterval: config.pollInterval || 500,
+                isBackgroundMode: !!config.isBackgroundMode
+            });
+
             if (!isRunning) {
-                const configJson = JSON.stringify({
-                    maxRetries: config.maxRetries || 50,
-                    retryCooldownMs: config.retryCooldownMs || 5000,
-                    retryDelaySeconds: config.retryDelaySeconds || 5,
-                    pollInterval: config.pollInterval || 500,
-                    isBackgroundMode: !!config.isBackgroundMode
-                });
                 this.log(`Calling __autoContinueStart in ${id}`);
                 await this._safeEvaluate(id, `if(window.__autoContinueStart) window.__autoContinueStart(${configJson})`, 1);
+            } else {
+                await this._safeEvaluate(id, `if(window.__autoContinueUpdateConfig) window.__autoContinueUpdateConfig(${configJson})`, 1);
             }
         } catch (e) {
             this.log(`Failed to inject into ${id}: ${e.message}`);
@@ -410,10 +431,14 @@ class CDPHandler {
             retries: 0,
             errorsDetected: 0,
             lastError: '',
+            lastBusyPattern: '',
             lastRetryAt: '',
             consecutiveRetries: 0,
             countdownActive: false,
             countdownSecondsLeft: 0,
+            waitingForPreviousInput: false,
+            busyAcks: 0,
+            nativeContinueRequested: false,
             retryHistory: []
         };
         for (const [id] of this.connections) {
@@ -429,8 +454,18 @@ class CDPHandler {
                     if (s.lastError) {
                         stats.lastError = s.lastError;
                     }
+                    if (s.lastBusyPattern) {
+                        stats.lastBusyPattern = s.lastBusyPattern;
+                    }
                     if (s.lastRetryAt) {
                         stats.lastRetryAt = s.lastRetryAt;
+                    }
+                    if (s.waitingForPreviousInput) {
+                        stats.waitingForPreviousInput = true;
+                    }
+                    stats.busyAcks += s.busyAcks || 0;
+                    if (s.nativeContinueRequested) {
+                        stats.nativeContinueRequested = true;
                     }
                     if (Array.isArray(s.retryHistory) && s.retryHistory.length > 0) {
                         stats.retryHistory = s.retryHistory;
@@ -467,7 +502,11 @@ class CDPHandler {
                     // Log meaningful events (not routine skips)
                     if (r.clicked) {
                         this.log(`[RemotePoll] Target ${id}: ✓ CLICKED retry for "${r.pattern}"`);
-                    } else if (r.errorFound && !r.buttonFound) {
+                    } else if (r.requestNativeContinue) {
+                        this.log(`[RemotePoll] Target ${id}: requesting native continue for "${r.pattern}"`);
+                    } else if (r.busyPattern) {
+                        // Input is still processing; suppress noisy retries.
+                    } else if (r.errorFound && !r.buttonFound && r.skipped !== 'arming') {
                         this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
                     } else if (r.errorFound && r.buttonFound && r.skipped === 'dedup') {
                         // Already handled recently, no need to log every time

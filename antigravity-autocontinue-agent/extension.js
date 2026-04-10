@@ -1,6 +1,11 @@
 const vscode = require('vscode');
 const http = require('http');
 const os = require('os');
+const {
+    buildRuntimeConfig,
+    normalizeProcessingDelaySeconds,
+    shouldAttemptNativeContinue
+} = require('./main_scripts/recovery-core');
 
 // State
 let isEnabled = false;
@@ -14,14 +19,17 @@ let globalContext;
 let cdpHandler;
 let controlPanel = null;
 let cdpPort = 9000;
-let pollInterval = 500;
+let processingDelaySeconds = 5;
+let pollInterval = 250;
+let remotePollIntervalMs = 1000;
+let cdpRescanIntervalMs = 1500;
+let controlPanelRefreshIntervalMs = 2000;
 let maxRetries = 50;
 let retryCooldownMs = 5000;
 let retryDelaySeconds = 5;
 let enableNativeCommands = true;
 let lastControlPanelStatePushTs = 0;
 let cdpRefreshTimer;
-let nativeCommandTimer;
 let activePollingTimer;
 let lastNativeCommandAttemptTs = 0;
 
@@ -102,25 +110,43 @@ function normalizeCdpPort(value, fallback = DEFAULT_CDP_PORT) {
 
 /**
  * Try to execute Antigravity's native continue/retry commands.
- * This serves as a belt-and-suspenders fallback alongside CDP DOM clicking.
- * Only fires when the IDE is Antigravity and enableNativeCommands is true.
+ * This is now an on-demand fallback only; never fire it on a blind timer.
  */
-async function tryNativeContinueCommands() {
-    if (!enableNativeCommands) return;
-    if ((currentIDE || '').toLowerCase() !== 'antigravity') return;
+async function tryNativeContinueCommands(request = {}) {
+    if (!enableNativeCommands) return false;
+    if ((currentIDE || '').toLowerCase() !== 'antigravity') return false;
 
     const now = Date.now();
-    // Don't spam — at most once every 6 seconds
-    if ((now - lastNativeCommandAttemptTs) < 6000) return;
+    const canAttempt = shouldAttemptNativeContinue({
+        nativeContinueRequested: true,
+        hasRetryButton: !!request.hasRetryButton,
+        hasBusySignal: !!request.hasBusySignal,
+        isAgentRunning: !!request.isAgentRunning,
+        now,
+        lastNativeAttemptTs: lastNativeCommandAttemptTs,
+        retryCooldownMs
+    });
+
+    if (!canAttempt) return false;
+
     lastNativeCommandAttemptTs = now;
+
+    let attempted = false;
 
     for (const cmd of ANTIGRAVITY_CONTINUE_COMMANDS) {
         try {
             await vscode.commands.executeCommand(cmd);
+            attempted = true;
         } catch (e) {
             // Command may not exist — that's fine
         }
     }
+
+    if (attempted) {
+        log(`Native continue fallback executed${request.pattern ? ` for "${request.pattern}"` : ''}`);
+    }
+
+    return attempted;
 }
 
 // =========================================================
@@ -158,10 +184,13 @@ async function activate(context) {
 
         // Load configuration
         loadConfiguration();
-        vscode.workspace.onDidChangeConfiguration((e) => {
+        vscode.workspace.onDidChangeConfiguration(async (e) => {
             if (e.affectsConfiguration('autoContinue')) {
                 loadConfiguration();
                 log('Configuration reloaded');
+                if (isEnabled) {
+                    await startMonitoring();
+                }
             }
         });
 
@@ -210,11 +239,26 @@ async function activate(context) {
 
 function loadConfiguration() {
     const config = vscode.workspace.getConfiguration('autoContinue');
+    const configuredProcessingDelay = config.get('processingDelaySeconds');
+    const legacyDelaySeconds = Math.max(1, Math.min(30, Number(config.get('retryDelaySeconds', 5)) || 5));
+    const legacyCooldownMs = Math.max(0, Math.min(30000, Number(config.get('retryCooldownMs', legacyDelaySeconds * 1000)) || 0));
+    const fallbackProcessingDelay = Math.max(legacyDelaySeconds, Math.round(legacyCooldownMs / 1000) || 0, 1);
+    const runtimeConfig = buildRuntimeConfig(
+        normalizeProcessingDelaySeconds(
+            configuredProcessingDelay == null ? fallbackProcessingDelay : configuredProcessingDelay,
+            fallbackProcessingDelay
+        )
+    );
+
     cdpPort = normalizeCdpPort(config.get('cdpPort', DEFAULT_CDP_PORT));
-    pollInterval = Math.max(100, Math.min(5000, Number(config.get('pollInterval', 500)) || 500));
+    processingDelaySeconds = runtimeConfig.processingDelaySeconds;
+    pollInterval = runtimeConfig.pollIntervalMs;
+    remotePollIntervalMs = runtimeConfig.remotePollIntervalMs;
+    cdpRescanIntervalMs = runtimeConfig.cdpRescanIntervalMs;
+    controlPanelRefreshIntervalMs = runtimeConfig.controlPanelRefreshIntervalMs;
     maxRetries = Math.max(1, Math.min(500, Number(config.get('maxRetries', 50)) || 50));
-    retryCooldownMs = Math.max(0, Math.min(30000, Number(config.get('retryCooldownMs', 5000)) || 0));
-    retryDelaySeconds = Math.max(1, Math.min(30, Number(config.get('retryDelaySeconds', 5)) || 5));
+    retryCooldownMs = runtimeConfig.retryCooldownMs;
+    retryDelaySeconds = runtimeConfig.retryDelaySeconds;
     enableNativeCommands = config.get('enableNativeCommands', true) !== false;
 }
 
@@ -225,11 +269,11 @@ function updateStatusBar() {
 
     if (isEnabled && backgroundModeEnabled) {
         statusBarItem.text = `⚡ AC: BG [${connCount}]`;
-        statusBarItem.tooltip = `AutoContinue Background Mode — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
+        statusBarItem.tooltip = `AutoContinue Background Mode — ${connCount} target(s) connected\nProcessing wait: ${processingDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else if (isEnabled) {
         statusBarItem.text = `⚡ AC: ON [${connCount}]`;
-        statusBarItem.tooltip = `AutoContinue Active — ${connCount} target(s) connected\nCooldown: ${retryCooldownMs}ms | Delay: ${retryDelaySeconds}s\nClick to disable`;
+        statusBarItem.tooltip = `AutoContinue Active — ${connCount} target(s) connected\nProcessing wait: ${processingDelaySeconds}s\nClick to disable`;
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
         statusBarItem.text = '⚡ AC: OFF';
@@ -250,7 +294,7 @@ async function handleToggle(context) {
     if (isEnabled) {
         log('AutoContinue: ENABLED');
         await startMonitoring();
-        vscode.window.showInformationMessage(`AutoContinue: Enabled — will auto-retry errors with ${retryDelaySeconds}s countdown`);
+        vscode.window.showInformationMessage(`AutoContinue: Enabled — will auto-retry with a ${processingDelaySeconds}s processing wait`);
     } else {
         log('AutoContinue: DISABLED');
         await stopMonitoring();
@@ -289,7 +333,6 @@ async function handleToggleBackground(context) {
 async function startMonitoring() {
     if (pollTimer) clearInterval(pollTimer);
     if (cdpRefreshTimer) clearInterval(cdpRefreshTimer);
-    if (nativeCommandTimer) clearInterval(nativeCommandTimer);
     if (activePollingTimer) clearInterval(activePollingTimer);
 
     if (!cdpHandler) {
@@ -306,42 +349,46 @@ async function startMonitoring() {
     // Initial sync
     await syncCDP();
 
-    // Fast CDP re-scan every 2 seconds (find new targets, reinject if needed)
+    // Fast CDP re-scan to find new targets and push config updates into running pages.
     cdpRefreshTimer = setInterval(async () => {
         if (!isEnabled) return;
         await syncCDP();
-    }, 2000);
+    }, cdpRescanIntervalMs);
 
     // Periodic control panel state push + status bar update
     pollTimer = setInterval(async () => {
         if (!isEnabled) return;
         updateStatusBar();
         pushControlPanelState();
-    }, 3000);
-
-    // Native command fallback — try Antigravity commands periodically
-    if (enableNativeCommands && (currentIDE || '').toLowerCase() === 'antigravity') {
-        nativeCommandTimer = setInterval(() => {
-            if (!isEnabled) return;
-            tryNativeContinueCommands();
-        }, 8000);
-        log('Native command fallback enabled');
-    }
+    }, controlPanelRefreshIntervalMs);
 
     // Active polling from extension process — the core background mode fix.
     // This runs in Node.js (never throttled), calling into each CDP target
     // to detect errors and click retry buttons even when tabs are backgrounded.
+    // It also handles any native-continue requests on demand.
     activePollingTimer = setInterval(async () => {
         if (!isEnabled || !cdpHandler) return;
         try {
-            await cdpHandler.pollAndRetry();
+            const results = await cdpHandler.pollAndRetry();
+            const nativeRequest = Array.isArray(results)
+                ? results.find((result) => result && result.requestNativeContinue)
+                : null;
+
+            if (nativeRequest) {
+                await tryNativeContinueCommands({
+                    hasRetryButton: !!nativeRequest.buttonFound,
+                    hasBusySignal: !!nativeRequest.busyPattern,
+                    isAgentRunning: !!nativeRequest.isAgentRunning,
+                    pattern: nativeRequest.pattern || nativeRequest.busyPattern || ''
+                });
+            }
         } catch (e) {
             // Silently ignore — individual target errors handled inside pollAndRetry
         }
-    }, 3000);
-    log('Active polling enabled (3s interval)');
+    }, remotePollIntervalMs);
+    log(`Active polling enabled (${remotePollIntervalMs}ms interval)`);
 
-    log('Monitoring started (CDP re-scan: 2s)');
+    log(`Monitoring started (CDP re-scan: ${cdpRescanIntervalMs}ms)`);
 }
 
 async function syncCDP() {
@@ -350,6 +397,7 @@ async function syncCDP() {
     try {
         await cdpHandler.start({
             cdpPort,
+            processingDelaySeconds,
             maxRetries,
             retryCooldownMs,
             retryDelaySeconds,
@@ -370,10 +418,6 @@ async function stopMonitoring() {
     if (cdpRefreshTimer) {
         clearInterval(cdpRefreshTimer);
         cdpRefreshTimer = null;
-    }
-    if (nativeCommandTimer) {
-        clearInterval(nativeCommandTimer);
-        nativeCommandTimer = null;
     }
     if (activePollingTimer) {
         clearInterval(activePollingTimer);
@@ -432,19 +476,14 @@ function openControlPanel(context) {
                 await pushControlPanelState();
                 break;
             }
-            case 'saveCooldown': {
-                const val = Math.max(0, Math.min(30000, Number(msg.value) || 0));
-                await vscode.workspace.getConfiguration('autoContinue').update('retryCooldownMs', val, vscode.ConfigurationTarget.Global);
-                retryCooldownMs = val;
-                log(`Retry cooldown saved: ${val}ms`);
-                await pushControlPanelState();
-                break;
-            }
-            case 'saveDelay': {
-                const val = Math.max(1, Math.min(30, Number(msg.value) || 5));
-                await vscode.workspace.getConfiguration('autoContinue').update('retryDelaySeconds', val, vscode.ConfigurationTarget.Global);
-                retryDelaySeconds = val;
-                log(`Retry delay saved: ${val}s`);
+            case 'saveProcessingDelay': {
+                const val = normalizeProcessingDelaySeconds(msg.value, processingDelaySeconds);
+                await vscode.workspace.getConfiguration('autoContinue').update('processingDelaySeconds', val, vscode.ConfigurationTarget.Global);
+                loadConfiguration();
+                if (isEnabled) {
+                    await syncCDP();
+                }
+                log(`Processing delay saved: ${val}s`);
                 await pushControlPanelState();
                 break;
             }
@@ -487,6 +526,7 @@ async function pushControlPanelState() {
                 cdpReady,
                 connectionCount,
                 pollInterval,
+                processingDelaySeconds,
                 maxRetries,
                 retryCooldownMs,
                 retryDelaySeconds,
@@ -496,9 +536,13 @@ async function pushControlPanelState() {
                     errorsDetected: stats.errorsDetected || 0,
                     consecutiveRetries: stats.consecutiveRetries || 0,
                     lastError: stats.lastError || '',
+                    lastBusyPattern: stats.lastBusyPattern || '',
                     lastRetryAt: stats.lastRetryAt || '',
                     countdownActive: stats.countdownActive || false,
                     countdownSecondsLeft: stats.countdownSecondsLeft || 0,
+                    waitingForPreviousInput: stats.waitingForPreviousInput || false,
+                    busyAcks: stats.busyAcks || 0,
+                    nativeContinueRequested: stats.nativeContinueRequested || false,
                     retryHistory: stats.retryHistory || []
                 },
                 lastRefreshedAt: new Date().toISOString()
@@ -801,6 +845,31 @@ function getControlPanelHtml() {
       outline: none;
       border-color: var(--accent);
     }
+    .config-item.wide {
+      grid-column: 1 / -1;
+    }
+    .slider-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .slider-wrap input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .slider-value {
+      min-width: 52px;
+      text-align: right;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+    .config-hint {
+      font-size: 11px;
+      color: var(--txt-secondary);
+      line-height: 1.4;
+    }
 
     .save-row {
       display: flex;
@@ -916,7 +985,7 @@ function getControlPanelHtml() {
       <div class="header">
         <div class="header-left">
           <div class="logo">⚡</div>
-          <h1>AutoContinue<span>v2</span></h1>
+          <h1>AutoContinue<span>v2.3</span></h1>
         </div>
         <div id="statusBadge" class="badge off">
           <span class="dot off" id="statusDot"></span>
@@ -996,7 +1065,7 @@ function getControlPanelHtml() {
 
     <!-- Last Error (hidden by default) -->
     <div class="card" id="errorCard" style="display:none;">
-      <div class="section-label">Last Error</div>
+      <div class="section-label" id="errorLabel">Last Error</div>
       <div class="error-log" id="lastError"></div>
     </div>
 
@@ -1012,20 +1081,18 @@ function getControlPanelHtml() {
           <label>Max Retries</label>
           <input id="maxRetriesInput" type="number" min="1" max="500" step="1" />
         </div>
-        <div class="config-item">
-          <label>Cooldown (ms)</label>
-          <input id="cooldownInput" type="number" min="0" max="30000" step="100" />
-        </div>
-        <div class="config-item">
-          <label>Retry Delay (s)</label>
-          <input id="delayInput" type="number" min="1" max="30" step="1" />
+        <div class="config-item wide">
+          <label>Processing Wait</label>
+          <div class="slider-wrap">
+            <input id="processingDelayInput" type="range" min="1" max="30" step="1" />
+            <div class="slider-value" id="processingDelayValue">5s</div>
+          </div>
+          <div class="config-hint">Fast scanning stays on. This only controls how long AutoContinue waits before retrying or sending a continue fallback.</div>
         </div>
       </div>
       <div class="save-row">
         <button id="savePort">Save Port</button>
         <button id="saveMaxRetries">Save Retries</button>
-        <button id="saveCooldown">Save Cooldown</button>
-        <button id="saveDelay">Save Delay</button>
       </div>
     </div>
 
@@ -1112,7 +1179,7 @@ function getControlPanelHtml() {
       if (stats.countdownActive && stats.countdownSecondsLeft > 0) {
         countdownCard.style.display = '';
         byId('countdownNumber').textContent = String(stats.countdownSecondsLeft);
-        const totalDelay = s.retryDelaySeconds || 5;
+        const totalDelay = s.processingDelaySeconds || s.retryDelaySeconds || 5;
         const pct = Math.max(0, (stats.countdownSecondsLeft / totalDelay) * 100);
         byId('countdownBar').style.width = pct + '%';
       } else {
@@ -1158,9 +1225,15 @@ function getControlPanelHtml() {
 
       // Error card
       const errorCard = byId('errorCard');
+      const errorLabel = byId('errorLabel');
       const errorEl = byId('lastError');
-      if (stats.lastError) {
+      if (stats.waitingForPreviousInput && stats.lastBusyPattern) {
         errorCard.style.display = '';
+        errorLabel.textContent = 'Input Queue';
+        errorEl.textContent = stats.lastBusyPattern + ' — waiting instead of sending another continue.';
+      } else if (stats.lastError) {
+        errorCard.style.display = '';
+        errorLabel.textContent = 'Last Error';
         errorEl.textContent = stats.lastError;
       } else {
         errorCard.style.display = 'none';
@@ -1170,8 +1243,8 @@ function getControlPanelHtml() {
       const activeId = document.activeElement ? document.activeElement.id : '';
       if (activeId !== 'portInput') byId('portInput').value = String(s.cdpPort || 9000);
       if (activeId !== 'maxRetriesInput') byId('maxRetriesInput').value = String(s.maxRetries || 50);
-      if (activeId !== 'cooldownInput') byId('cooldownInput').value = String(s.retryCooldownMs != null ? s.retryCooldownMs : 5000);
-      if (activeId !== 'delayInput') byId('delayInput').value = String(s.retryDelaySeconds || 5);
+      if (activeId !== 'processingDelayInput') byId('processingDelayInput').value = String(s.processingDelaySeconds || 5);
+      byId('processingDelayValue').textContent = String(s.processingDelaySeconds || 5) + 's';
 
       // Timestamps
       if (s.lastRefreshedAt) {
@@ -1195,8 +1268,12 @@ function getControlPanelHtml() {
     byId('refreshBtn').addEventListener('click', () => post('refresh'));
     byId('savePort').addEventListener('click', () => post('savePort', { port: Number(byId('portInput').value) }));
     byId('saveMaxRetries').addEventListener('click', () => post('saveMaxRetries', { value: Number(byId('maxRetriesInput').value) }));
-    byId('saveCooldown').addEventListener('click', () => post('saveCooldown', { value: Number(byId('cooldownInput').value) }));
-    byId('saveDelay').addEventListener('click', () => post('saveDelay', { value: Number(byId('delayInput').value) }));
+    byId('processingDelayInput').addEventListener('input', () => {
+      byId('processingDelayValue').textContent = String(byId('processingDelayInput').value) + 's';
+    });
+    byId('processingDelayInput').addEventListener('change', () => {
+      post('saveProcessingDelay', { value: Number(byId('processingDelayInput').value) });
+    });
     byId('copyDiagnostics').addEventListener('click', () => post('copyDiagnostics'));
     byId('openOutputLog').addEventListener('click', () => post('openOutputLog'));
 
@@ -1227,6 +1304,7 @@ async function handleCopyDiagnostics() {
             `cdpReady=${cdpReady}`,
             `connectionCount=${cdpHandler ? cdpHandler.getConnectionCount() : 0}`,
             `pollInterval=${pollInterval}`,
+            `processingDelaySeconds=${processingDelaySeconds}`,
             `maxRetries=${maxRetries}`,
             `retryCooldownMs=${retryCooldownMs}`,
             `retryDelaySeconds=${retryDelaySeconds}`,
@@ -1235,6 +1313,10 @@ async function handleCopyDiagnostics() {
             `stats.errorsDetected=${stats.errorsDetected || 0}`,
             `stats.consecutiveRetries=${stats.consecutiveRetries || 0}`,
             `stats.countdownActive=${stats.countdownActive || false}`,
+            `stats.waitingForPreviousInput=${stats.waitingForPreviousInput || false}`,
+            `stats.lastBusyPattern=${stats.lastBusyPattern || '-'}`,
+            `stats.busyAcks=${stats.busyAcks || 0}`,
+            `stats.nativeContinueRequested=${stats.nativeContinueRequested || false}`,
             `stats.lastError=${stats.lastError || '-'}`,
             `stats.lastRetryAt=${stats.lastRetryAt || '-'}`
         ];
@@ -1258,10 +1340,6 @@ function deactivate() {
     if (cdpRefreshTimer) {
         clearInterval(cdpRefreshTimer);
         cdpRefreshTimer = null;
-    }
-    if (nativeCommandTimer) {
-        clearInterval(nativeCommandTimer);
-        nativeCommandTimer = null;
     }
     if (activePollingTimer) {
         clearInterval(activePollingTimer);
