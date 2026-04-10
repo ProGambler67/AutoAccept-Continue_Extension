@@ -20,10 +20,14 @@ var require_recovery_core = __commonJS({
       const REMOTE_POLL_INTERVAL_MS = 1e3;
       const CDP_RESCAN_INTERVAL_MS = 1500;
       const CONTROL_PANEL_REFRESH_INTERVAL_MS = 2e3;
+      const MIN_NATIVE_CONTINUE_REPEAT_MS = 3e4;
       const BUSY_PATTERNS = [
         "agent hasn't processed previous input",
         "agent hasnt processed previous input",
         "agent has not processed previous input",
+        "executor has not processed the previous input yet",
+        "executor hasnt processed the previous input yet",
+        "has not processed the previous input yet",
         "previous input is still being processed",
         "previous input is still processing",
         "still processing previous input",
@@ -94,13 +98,39 @@ var require_recovery_core = __commonJS({
         const cooldown = Math.max(1e3, Number(retryCooldownMs2) || 0);
         return attemptNow - lastAttempt >= cooldown;
       }
+      function shouldQueueNativeContinueRequest({
+        pattern,
+        nativeContinueRequested,
+        nativeContinuePattern,
+        lastNativeContinuePattern,
+        lastNativeContinueAttemptAt,
+        now,
+        minRepeatMs = MIN_NATIVE_CONTINUE_REPEAT_MS
+      }) {
+        const normalizedPattern = normalizeText(pattern);
+        if (!normalizedPattern)
+          return false;
+        if (nativeContinueRequested && normalizeText(nativeContinuePattern) === normalizedPattern) {
+          return false;
+        }
+        const lastPattern = normalizeText(lastNativeContinuePattern);
+        const attemptNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+        const lastAttempt = Number.isFinite(Number(lastNativeContinueAttemptAt)) ? Number(lastNativeContinueAttemptAt) : 0;
+        const repeatWindow = Math.max(1e3, Number(minRepeatMs) || MIN_NATIVE_CONTINUE_REPEAT_MS);
+        if (lastPattern === normalizedPattern && attemptNow - lastAttempt < repeatWindow) {
+          return false;
+        }
+        return true;
+      }
       return {
         BUSY_PATTERNS,
         DEFAULT_PROCESSING_DELAY_SECONDS,
+        MIN_NATIVE_CONTINUE_REPEAT_MS,
         buildRuntimeConfig: buildRuntimeConfig2,
         detectBusyPattern,
         normalizeProcessingDelaySeconds: normalizeProcessingDelaySeconds2,
         shouldAttemptNativeContinue: shouldAttemptNativeContinue2,
+        shouldQueueNativeContinueRequest,
         shouldUseRemotePoll
       };
     });
@@ -4289,6 +4319,21 @@ ${autoContinueScript}`;
         }
         return stats;
       }
+      async acknowledgeNativeContinueRequest(targetId, pattern, attemptedAt = Date.now()) {
+        if (!targetId)
+          return;
+        const payload = JSON.stringify({
+          pattern: pattern || "",
+          attemptedAt
+        });
+        try {
+          await this._evaluate(
+            targetId,
+            `if(window.__autoContinueAcknowledgeNativeContinue) window.__autoContinueAcknowledgeNativeContinue(${payload})`
+          );
+        } catch (e) {
+        }
+      }
       /**
        * Active polling from the extension process (Node.js — never throttled).
        * Calls __autoContinuePollOnce() on every connected CDP target.
@@ -4316,10 +4361,10 @@ ${autoContinueScript}`;
               results.push(r);
               if (r.clicked) {
                 this.log(`[RemotePoll] Target ${id}: \u2713 CLICKED retry for "${r.pattern}"`);
-              } else if (r.requestNativeContinue) {
+              } else if (r.requestNativeContinue && r.skipped !== "native-pending") {
                 this.log(`[RemotePoll] Target ${id}: requesting native continue for "${r.pattern}"`);
               } else if (r.busyPattern) {
-              } else if (r.errorFound && !r.buttonFound && r.skipped !== "arming") {
+              } else if (r.errorFound && !r.buttonFound && !["arming", "native-backoff"].includes(r.skipped)) {
                 this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
               } else if (r.errorFound && r.buttonFound && r.skipped === "dedup") {
               }
@@ -4632,12 +4677,21 @@ async function startMonitoring() {
       const results = await cdpHandler.pollAndRetry();
       const nativeRequest = Array.isArray(results) ? results.find((result) => result && result.requestNativeContinue) : null;
       if (nativeRequest) {
-        await tryNativeContinueCommands({
+        const attempted = await tryNativeContinueCommands({
           hasRetryButton: !!nativeRequest.buttonFound,
           hasBusySignal: !!nativeRequest.busyPattern,
           isAgentRunning: !!nativeRequest.isAgentRunning,
           pattern: nativeRequest.pattern || nativeRequest.busyPattern || ""
         });
+        if (attempted) {
+          await cdpHandler.acknowledgeNativeContinueRequest(
+            nativeRequest.targetId,
+            nativeRequest.pattern || nativeRequest.busyPattern || "",
+            Date.now()
+          );
+        } else {
+          log(`Native continue request still pending for "${nativeRequest.pattern || nativeRequest.busyPattern || ""}"`);
+        }
       }
     } catch (e) {
     }

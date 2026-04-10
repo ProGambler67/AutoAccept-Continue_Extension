@@ -375,12 +375,21 @@ async function startMonitoring() {
                 : null;
 
             if (nativeRequest) {
-                await tryNativeContinueCommands({
+                const attempted = await tryNativeContinueCommands({
                     hasRetryButton: !!nativeRequest.buttonFound,
                     hasBusySignal: !!nativeRequest.busyPattern,
                     isAgentRunning: !!nativeRequest.isAgentRunning,
                     pattern: nativeRequest.pattern || nativeRequest.busyPattern || ''
                 });
+                if (attempted) {
+                    await cdpHandler.acknowledgeNativeContinueRequest(
+                        nativeRequest.targetId,
+                        nativeRequest.pattern || nativeRequest.busyPattern || '',
+                        Date.now()
+                    );
+                } else {
+                    log(`Native continue request still pending for "${nativeRequest.pattern || nativeRequest.busyPattern || ''}"`);
+                }
             }
         } catch (e) {
             // Silently ignore — individual target errors handled inside pollAndRetry

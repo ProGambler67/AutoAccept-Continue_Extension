@@ -476,6 +476,24 @@ class CDPHandler {
         return stats;
     }
 
+    async acknowledgeNativeContinueRequest(targetId, pattern, attemptedAt = Date.now()) {
+        if (!targetId) return;
+
+        const payload = JSON.stringify({
+            pattern: pattern || '',
+            attemptedAt
+        });
+
+        try {
+            await this._evaluate(
+                targetId,
+                `if(window.__autoContinueAcknowledgeNativeContinue) window.__autoContinueAcknowledgeNativeContinue(${payload})`
+            );
+        } catch (e) {
+            // Non-fatal: target may have reloaded between poll and acknowledgement.
+        }
+    }
+
     /**
      * Active polling from the extension process (Node.js — never throttled).
      * Calls __autoContinuePollOnce() on every connected CDP target.
@@ -502,11 +520,11 @@ class CDPHandler {
                     // Log meaningful events (not routine skips)
                     if (r.clicked) {
                         this.log(`[RemotePoll] Target ${id}: ✓ CLICKED retry for "${r.pattern}"`);
-                    } else if (r.requestNativeContinue) {
+                    } else if (r.requestNativeContinue && r.skipped !== 'native-pending') {
                         this.log(`[RemotePoll] Target ${id}: requesting native continue for "${r.pattern}"`);
                     } else if (r.busyPattern) {
                         // Input is still processing; suppress noisy retries.
-                    } else if (r.errorFound && !r.buttonFound && r.skipped !== 'arming') {
+                    } else if (r.errorFound && !r.buttonFound && !['arming', 'native-backoff'].includes(r.skipped)) {
                         this.log(`[RemotePoll] Target ${id}: Error "${r.pattern}" but no retry button found`);
                     } else if (r.errorFound && r.buttonFound && r.skipped === 'dedup') {
                         // Already handled recently, no need to log every time

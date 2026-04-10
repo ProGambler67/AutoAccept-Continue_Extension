@@ -17,6 +17,7 @@
     };
     const CORE = globalThis.AutoContinueRecoveryCore || {};
     const detectBusyPatternFromText = CORE.detectBusyPattern || (() => '');
+    const shouldQueueNativeContinueRequest = CORE.shouldQueueNativeContinueRequest || (() => true);
     const shouldUseRemotePoll = CORE.shouldUseRemotePoll || (({ isBackgroundMode, documentHidden, visibilityState }) => {
         if (isBackgroundMode) return true;
         if (documentHidden) return true;
@@ -508,6 +509,8 @@
             nativeContinueRequested: false,
             nativeContinuePattern: '',
             nativeContinueRequestedAt: 0,
+            lastNativeContinuePattern: '',
+            lastNativeContinueAttemptAt: 0,
             lastBusyClickAt: 0,
             busyAcks: 0,
             waitingForPreviousInput: false,
@@ -552,15 +555,35 @@
     }
 
     function setNativeContinueRequest(state, pattern, now) {
+        const shouldQueue = shouldQueueNativeContinueRequest({
+            pattern,
+            nativeContinueRequested: state.nativeContinueRequested,
+            nativeContinuePattern: state.nativeContinuePattern,
+            lastNativeContinuePattern: state.lastNativeContinuePattern,
+            lastNativeContinueAttemptAt: state.lastNativeContinueAttemptAt,
+            now
+        });
+
+        if (!shouldQueue) return false;
+
         state.nativeContinueRequested = true;
         state.nativeContinuePattern = pattern;
         state.nativeContinueRequestedAt = now;
+        return true;
     }
 
     function clearNativeContinueRequest(state) {
         state.nativeContinueRequested = false;
         state.nativeContinuePattern = '';
         state.nativeContinueRequestedAt = 0;
+    }
+
+    function acknowledgeNativeContinueRequest(state, pattern, now) {
+        const ts = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+        const nextPattern = pattern || state.nativeContinuePattern || state.lastNativeContinuePattern || '';
+        state.lastNativeContinuePattern = nextPattern;
+        state.lastNativeContinueAttemptAt = ts;
+        clearNativeContinueRequest(state);
     }
 
     // =================================================================
@@ -628,6 +651,8 @@
         if (!error.found) {
             clearPendingAutoAction(state);
             clearNativeContinueRequest(state);
+            state.lastNativeContinuePattern = '';
+            state.lastNativeContinueAttemptAt = 0;
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
                 state.consecutiveRetries = 0;
                 state.lastHandledSig = '';
@@ -648,8 +673,10 @@
             }
 
             if (readyForFallback && !isAgentActivelyRunning()) {
-                setNativeContinueRequest(state, error.pattern, now);
-                log(`Requesting native continue fallback for "${error.pattern}"`);
+                const queued = setNativeContinueRequest(state, error.pattern, now);
+                if (queued) {
+                    log(`Requesting native continue fallback for "${error.pattern}"`);
+                }
             }
             return;
         }
@@ -736,6 +763,13 @@
     // =================================================================
     // PUBLIC API
     // =================================================================
+
+    window.__autoContinueAcknowledgeNativeContinue = function (payload) {
+        const state = window.__autoContinueState;
+        const pattern = payload && typeof payload === 'object' ? payload.pattern : '';
+        const attemptedAt = payload && typeof payload === 'object' ? payload.attemptedAt : 0;
+        acknowledgeNativeContinueRequest(state, pattern, attemptedAt);
+    };
 
     window.__autoContinueGetStats = function () {
         const s = window.__autoContinueState;
@@ -846,6 +880,8 @@
         if (!error.found) {
             clearPendingAutoAction(state);
             clearNativeContinueRequest(state);
+            state.lastNativeContinuePattern = '';
+            state.lastNativeContinueAttemptAt = 0;
             // Reset consecutive if enough time passed
             if (state.consecutiveRetries > 0 && (now - state.lastRetryAt) > 10000) {
                 state.consecutiveRetries = 0;
@@ -861,11 +897,19 @@
         result.isAgentRunning = isAgentActivelyRunning();
 
         if (buttons.length === 0) {
+            if (state.nativeContinueRequested && state.nativeContinuePattern === error.pattern) {
+                result.requestNativeContinue = true;
+                result.skipped = 'native-pending';
+                return result;
+            }
+
             const readyForFallback = armPendingAutoAction(state, error.pattern, now);
 
             if (readyForFallback && !result.isAgentRunning) {
-                setNativeContinueRequest(state, error.pattern, now);
-                result.requestNativeContinue = true;
+                result.requestNativeContinue = setNativeContinueRequest(state, error.pattern, now);
+                if (!result.requestNativeContinue) {
+                    result.skipped = 'native-backoff';
+                }
             } else if (!readyForFallback) {
                 result.skipped = 'arming';
             } else {
@@ -989,6 +1033,8 @@
         state.lastError = '';
         state.lastBusyPattern = '';
         state.lastHandledSig = '';
+        state.lastNativeContinuePattern = '';
+        state.lastNativeContinueAttemptAt = 0;
         state.waitingForPreviousInput = false;
         state.countdownActive = false;
         state.countdownSecondsLeft = 0;
@@ -1041,6 +1087,8 @@
         state.countdownSecondsLeft = 0;
         state.waitingForPreviousInput = false;
         state.lastBusyPattern = '';
+        state.lastNativeContinuePattern = '';
+        state.lastNativeContinueAttemptAt = 0;
         clearPendingAutoAction(state);
         clearNativeContinueRequest(state);
         if (state._interval) { clearInterval(state._interval); state._interval = null; }

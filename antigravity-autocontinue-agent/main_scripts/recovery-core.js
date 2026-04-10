@@ -14,11 +14,15 @@
     const REMOTE_POLL_INTERVAL_MS = 1000;
     const CDP_RESCAN_INTERVAL_MS = 1500;
     const CONTROL_PANEL_REFRESH_INTERVAL_MS = 2000;
+    const MIN_NATIVE_CONTINUE_REPEAT_MS = 30000;
 
     const BUSY_PATTERNS = [
         "agent hasn't processed previous input",
         'agent hasnt processed previous input',
         'agent has not processed previous input',
+        'executor has not processed the previous input yet',
+        'executor hasnt processed the previous input yet',
+        'has not processed the previous input yet',
         'previous input is still being processed',
         'previous input is still processing',
         'still processing previous input',
@@ -99,13 +103,43 @@
         return (attemptNow - lastAttempt) >= cooldown;
     }
 
+    function shouldQueueNativeContinueRequest({
+        pattern,
+        nativeContinueRequested,
+        nativeContinuePattern,
+        lastNativeContinuePattern,
+        lastNativeContinueAttemptAt,
+        now,
+        minRepeatMs = MIN_NATIVE_CONTINUE_REPEAT_MS
+    }) {
+        const normalizedPattern = normalizeText(pattern);
+        if (!normalizedPattern) return false;
+
+        if (nativeContinueRequested && normalizeText(nativeContinuePattern) === normalizedPattern) {
+            return false;
+        }
+
+        const lastPattern = normalizeText(lastNativeContinuePattern);
+        const attemptNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+        const lastAttempt = Number.isFinite(Number(lastNativeContinueAttemptAt)) ? Number(lastNativeContinueAttemptAt) : 0;
+        const repeatWindow = Math.max(1000, Number(minRepeatMs) || MIN_NATIVE_CONTINUE_REPEAT_MS);
+
+        if (lastPattern === normalizedPattern && (attemptNow - lastAttempt) < repeatWindow) {
+            return false;
+        }
+
+        return true;
+    }
+
     return {
         BUSY_PATTERNS,
         DEFAULT_PROCESSING_DELAY_SECONDS,
+        MIN_NATIVE_CONTINUE_REPEAT_MS,
         buildRuntimeConfig,
         detectBusyPattern,
         normalizeProcessingDelaySeconds,
         shouldAttemptNativeContinue,
+        shouldQueueNativeContinueRequest,
         shouldUseRemotePoll
     };
 });
